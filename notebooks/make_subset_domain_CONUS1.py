@@ -17,7 +17,6 @@ environment variables (preferred for non-interactive/batch runs).
 import argparse
 import os
 
-import numpy as np
 import hf_hydrodata as hf
 import subsettools as st
 from parflow.tools.io import write_pfb
@@ -26,10 +25,12 @@ from parflow.tools.fs import mkdir
 
 DEFAULT_STATIC_VARS = [
     'slope_x', 'slope_y', 'pme', 'ss_pressure_head', 'pf_indicator',
-    'pf_flowbarrier', 'mannings', 'specific_storage', 'sres', 'ssat',
-    'top_patch', 'porosity', 'permeability_x', 'permeability_y',
-    'permeability_z', 'vg_alpha', 'vg_n',
+    'porosity', 'permeability', 'van_genuchten_alpha', 'van_genuchten_n',
 ]
+# Verified against hf.get_variables({"dataset": "conus1_domain", "grid": "conus1"}).
+# Not available for conus1_domain at all (present for conus2_domain, no CONUS1
+# equivalent found): pf_flowbarrier, mannings, specific_storage, sres, ssat,
+# top_patch. permeability is a single field here, not split into x/y/z.
 
 
 def parse_args():
@@ -92,7 +93,10 @@ def main():
     mkdir(static_write_dir)
     mkdir(transient_write_dir)
 
-    # --- Define the domain box and sanity-check it against the active mask ---
+    # --- Define the domain box ---
+    # Note: conus1_domain has no "mask" variable (confirmed via
+    # hf.get_variables), unlike conus2_domain, so there's no equivalent
+    # sanity check available here before pulling data.
     ij_bounds = (
         args.lower_left_i,
         args.lower_left_j,
@@ -103,18 +107,6 @@ def main():
     nj = ij_bounds[3] - ij_bounds[1]
     print(f'bounding box: {ij_bounds}')
     print(f'ni: {ni}, nj: {nj}')
-
-    mask = hf.get_gridded_data({
-        'dataset': args.static_dataset, 'variable': 'mask', 'grid_bounds': ij_bounds,
-    })
-    outside_frac = np.count_nonzero(np.isnan(mask)) / (args.box_nx * args.box_ny) * 100
-    print(f'{outside_frac}% of the domain is outside the mask')
-    if outside_frac > 50:
-        print(
-            'WARNING: more than half this box falls outside the active domain. '
-            'CONUS1 grid indexing differs from CONUS2 -- pick a new '
-            '--lower-left-i/--lower-left-j rather than reusing CONUS2 values.'
-        )
 
     # --- Subset static parameters ---
     variable_list = args.static_vars.split(',')
