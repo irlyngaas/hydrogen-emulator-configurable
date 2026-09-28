@@ -6,9 +6,22 @@ and <base_dir>/<run_name>/transient/{pressure,evaptrans}.NNNNN.pfb
 
 Adapted from make_subset_domain_CONUS2.1.py after CONUS2 transient pressure
 data (pressure_head) turned out not to be exposed via the HydroData API for
-this account -- CONUS1 is, via the conus1_baseline_85 / conus1_baseline_mod
-datasets. See the CONUS1 vs CONUS2 discussion in the accompanying repo
-notes: different vertical layer count, different grid indexing than CONUS2.
+this account -- CONUS1's conus1_baseline_mod dataset is, and has both
+pressure_head and evapotranspiration.
+
+Notable differences from the original CONUS2 emulator design, discovered
+while setting this up (see git history / project notes for the full
+debugging trail):
+  - CONUS1 has 5 vertical pressure layers, not CONUS2's 10.
+  - There's no true multi-layer, hourly "parflow_evaptrans" forcing term
+    available for CONUS1 the way there was for CONUS2. The closest
+    available variable is "evapotranspiration" -- a single 2D field
+    (no z-dimension), daily resolution only, and a coarser aggregate
+    quantity than the internal ParFlow forcing term. Pressure is pulled
+    at daily resolution too here to keep it aligned with evaptrans, rather
+    than hourly. This is a deliberate simplification to get a baseline
+    training run working, not a physically equivalent substitute -- revisit
+    if the CONUS1 baseline needs to be more rigorous later.
 
 You need a HydroData account: register at https://hydrogen.princeton.edu/pin
 Provide credentials via --email/--pin, or the HYDRODATA_EMAIL/HYDRODATA_PIN
@@ -47,9 +60,10 @@ def parse_args():
     parser.add_argument('--grid', default='conus1')
     parser.add_argument('--static-dataset', default='conus1_domain',
                          help='Dataset to pull static variables from')
-    parser.add_argument('--transient-dataset', default='conus1_baseline_85',
-                         help='Dataset to pull pressure/evaptrans from '
-                              '(conus1_baseline_85 or conus1_baseline_mod)')
+    parser.add_argument('--transient-dataset', default='conus1_baseline_mod',
+                         help='Dataset to pull pressure/evaptrans from -- '
+                              'conus1_baseline_mod confirmed to have both '
+                              'pressure_head and evapotranspiration')
     parser.add_argument('--static-vars', default=','.join(DEFAULT_STATIC_VARS),
                          help='Comma-separated list of static variables to subset')
 
@@ -116,10 +130,13 @@ def main():
     )
     print(f'Static variables written to {static_write_dir}')
 
-    # --- Pull pressure + evaptrans and write as hourly .pfb files ---
+    # --- Pull pressure + evaptrans, aligned at daily resolution ---
+    # (evapotranspiration is only available daily for conus1_baseline_mod --
+    # confirmed via hf.get_catalog_entry -- so pressure is pulled daily too
+    # rather than mixing resolutions)
     data_p = hf.get_gridded_data({
         'dataset': args.transient_dataset, 'variable': 'pressure_head',
-        'temporal_resolution': 'hourly',
+        'temporal_resolution': 'daily',
         'start_time': args.transient_start, 'end_time': args.transient_end,
         'grid_bounds': ij_bounds,
     })
@@ -127,21 +144,28 @@ def main():
     print(f'(shape[1] here is the number of vertical layers for CONUS1)')
 
     data_et = hf.get_gridded_data({
-        'dataset': args.transient_dataset, 'variable': 'parflow_evaptrans',
-        'temporal_resolution': 'hourly',
+        'dataset': args.transient_dataset, 'variable': 'evapotranspiration',
+        'temporal_resolution': 'daily',
         'start_time': args.transient_start, 'end_time': args.transient_end,
         'grid_bounds': ij_bounds,
     })
     print(f'Evaptrans downloaded, shape: {data_et.shape}')
 
-    for hour in range(data_p.shape[0]):
+    for t in range(data_p.shape[0]):
         write_pfb(
-            file=f'{transient_write_dir}/pressure.{hour:05d}.pfb',
-            array=data_p[hour, :, :, :], dist=False,
+            file=f'{transient_write_dir}/pressure.{t:05d}.pfb',
+            array=data_p[t, :, :, :], dist=False,
         )
+        et_frame = data_et[t]
+        if et_frame.ndim == 2:
+            # evapotranspiration has no z-dimension (has_z: '' in the catalog
+            # entry, unlike pressure_head) -- add a singleton layer so the
+            # written file is still a 3D (1, ny, nx) array like dataset.py
+            # expects (it slices evaptrans[0:n_evaptrans, :, :])
+            et_frame = et_frame[None, :, :]
         write_pfb(
-            file=f'{transient_write_dir}/evaptrans.{hour:05d}.pfb',
-            array=data_et[hour, :, :, :], dist=False,
+            file=f'{transient_write_dir}/evaptrans.{t:05d}.pfb',
+            array=et_frame, dist=False,
         )
     print(f'Pressure and ET files written to {transient_write_dir}')
     print(f'Done. Run directory: {input_dir}')
