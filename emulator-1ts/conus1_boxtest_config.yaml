@@ -7,7 +7,7 @@ n_epochs: 5      # small -- this is a smoke test, not a real training run yet
 batch_size: 4
 lr: 0.001
 num_workers: 1
-device: cpu      # switch to cuda:0 if you're running this on an allocated GPU node
+device: cuda:0   # switch back to cpu if running interactively on a login node instead of a GPU allocation
 dtype: float32
 data_def:
   data_dir: /lustre/orion/stf006/proj-shared/irl1/hydrogen-data
