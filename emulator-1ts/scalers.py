@@ -1,7 +1,6 @@
 import os
 import pickle
 import yaml
-import utils
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SCALER_PATH = f'{HERE}/default_scalers_adjusted_pressure.yaml'
