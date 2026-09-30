@@ -6,6 +6,7 @@ from model import get_model
 from train import train_model
 from argparse import ArgumentParser
 from utils import get_optimizer, get_loss, get_dtype
+from scalers import create_scalers_from_yaml
 from torch.utils.data import DataLoader
 
 def read_config(config_path):
@@ -45,6 +46,13 @@ def train(
 ):
     # Create the data loader
     dtype = get_dtype(dtype)
+    # scaler_yaml isn't a ParFlowDataset argument -- pull it out here and use
+    # it to build the model's scalers dict below instead (previously this
+    # key was either silently ignored or crashed the dataset constructor
+    # with an unexpected-keyword-argument error, depending on whether it
+    # was present in data_def).
+    data_def = dict(data_def)
+    scaler_yaml = data_def.pop('scaler_yaml', None)
     dataset = ParFlowDataset(**data_def, dtype=dtype)
     train_dl = DataLoader(
         dataset, 
@@ -63,6 +71,8 @@ def train(
     model_def['n_evaptrans'] = dataset.n_evaptrans
     model_def['parameter_list'] = dataset.parameter_list
     model_def['param_nlayer'] = dataset.param_nlayer
+    if scaler_yaml is not None:
+        model_def['scalers'] = create_scalers_from_yaml(scaler_yaml)
     model = get_model(model_type, model_def)
     model = model.to(device).to(dtype)
 

@@ -1,0 +1,26 @@
+name: conus1_boxtest
+log_location: /lustre/orion/stf006/proj-shared/irl1/hydrogen-emulator-runs  # CHANGE ME if you want a different output location; must already exist
+model_type: resnet
+optimizer: adam
+loss: mse
+n_epochs: 5      # small -- this is a smoke test, not a real training run yet
+batch_size: 4
+lr: 0.001
+num_workers: 1
+device: cpu      # switch to cuda:0 if you're running this on an allocated GPU node
+dtype: float32
+data_def:
+  data_dir: /lustre/orion/stf006/proj-shared/irl1/hydrogen-data
+  run_name: CONUS1_boxtest_conus1_baseline_mod_2002-10-01
+  parameter_list: ['slope_x', 'slope_y', 'pme', 'ss_pressure_head', 'pf_indicator', 'porosity', 'permeability', 'van_genuchten_alpha', 'van_genuchten_n']
+  patch_size: 16
+  overlap: 4
+  scaler_yaml: FILL_IN_PATH_FROM_compute_conus1_scalers.py  # e.g. /path/to/conus1_scalers.yaml
+  param_nlayer: [0, 0, 0, 0, 0, 0, 0, 0, 0]  # 0 = use all layers for each param
+  n_evaptrans: 1  # confirmed from evaptrans shape (T, ny, nx) -- no z-dimension
+model_def:
+  in_channels: FILL_IN_FROM_compute_conus1_scalers.py  # run the script first, use its printed in_channels value
+  out_channels: 5   # confirmed from pressure shape (T, 5, ny, nx) -- CONUS1 has 5 vertical layers
+  kernel_size: 3
+  hidden_dim: 64
+  depth: 1
