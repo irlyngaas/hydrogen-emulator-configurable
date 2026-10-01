@@ -61,18 +61,31 @@ def train_model(
     # logging_location is a local directory (PyTorch Lightning's CSVLogger
     # writes metrics.csv + hparams.yaml under
     # <logging_location>/<run_name>/version_N/).
+    #
+    # Every rank constructs its own logger instance here (Lightning expects
+    # that), but log_hyperparams()/shutil.copy() below are plain, unguarded
+    # Python code running *before* pl.Trainer even exists -- Lightning's
+    # rank-aware logger-writing guarantees only apply once trainer.fit()
+    # actually runs. Without a manual rank-0 guard, every SLURM-launched
+    # process computes CSVLogger's "next version number" from an independent,
+    # uncoordinated filesystem scan at the same moment and can collide on the
+    # same directory (confirmed: an 8-task run raced on the same version_N
+    # and crashed with "IsADirectoryError" at shutil.copy). Same principle
+    # as the is_main_process guard emulator-1ts's main.py needed.
+    rank = int(os.environ.get('SLURM_PROCID', 0))
     logger = pl.loggers.CSVLogger(
         save_dir=logging_location,
         name=run_name,
     )
-    logger.log_hyperparams({
-        k: v for k, v in locals().items()
-        if k not in ('logger', 'callbacks') and isinstance(v, (int, float, str, bool))
-    })
-    if config_file:
-        # CSVLogger has no artifact store like MLflow's -- just copy the
-        # config alongside the run's own log directory instead.
-        shutil.copy(config_file, logger.log_dir)
+    if rank == 0:
+        logger.log_hyperparams({
+            k: v for k, v in locals().items()
+            if k not in ('logger', 'callbacks') and isinstance(v, (int, float, str, bool))
+        })
+        if config_file:
+            # CSVLogger has no artifact store like MLflow's -- just copy the
+            # config alongside the run's own log directory instead.
+            shutil.copy(config_file, logger.log_dir)
 
     # Set up the model. device=None disables model_setup's own internal
     # model.to(device) call (it otherwise defaults to a hardcoded 'cuda'
@@ -113,29 +126,30 @@ def train_model(
 
     # Configure the trainer.
     # Lightning's accelerator wants 'cpu'/'gpu'/'auto', not a raw device
-    # string like 'cuda:0'. devices=/num_nodes= describe GPUs-per-node and
-    # node count; derived from SLURM's own env vars (set by sbatch/srun, so
-    # these fall back to 1/1 -- today's single-process behavior, unchanged --
-    # whenever this isn't running under SLURM at all, exactly like the plain
-    # interactive run that already worked).
+    # string like 'cuda:0'.
     #
-    # Launched via srun with one task per GPU (--gpus-per-task=1
-    # --gpu-bind=closest, same pattern as emulator-1ts's
-    # run_conus1_training.slurm), Lightning's SLURM-aware DDP strategy
-    # handles rank/local-rank/process-group setup itself, including mapping
-    # each process's one visible GPU correctly -- unlike emulator-1ts's
-    # hand-rolled main.py, none of the local_rank % device_count() correction
-    # work from that effort needs repeating here; Lightning's SLURM
-    # integration already does the equivalent internally.
+    # devices= must be 1, not the GPU-per-node count: confirmed by actually
+    # running an 8-task job --
+    #   "MisconfigurationException: You requested gpu: [0,1,2,3,4,5,6,7]
+    #    But your machine only has: [0]"
+    # -- devices=N literally asks THIS process to see/use N local GPU
+    # indices, but --gpus-per-task=1 --gpu-bind=closest (the launch flags
+    # run_conus1_forcedstrnn_training.slurm uses, same as emulator-1ts's
+    # script) restricts each process to exactly ONE visible GPU, always
+    # index 0. The 8-way parallelism comes entirely from there being 8
+    # separately-launched srun tasks, which Lightning's SLURM-aware
+    # environment detects on its own directly from SLURM_NTASKS/
+    # SLURM_PROCID/SLURM_LOCALID -- independent of whatever devices= says.
     if str(device).startswith('cuda'):
         accelerator = 'gpu'
-        devices = int(os.environ.get('SLURM_NTASKS_PER_NODE', 1))
+        devices = 1
         num_nodes = int(os.environ.get('SLURM_NNODES', 1))
     else:
         accelerator = 'cpu'
         devices = 1
         num_nodes = 1
-    strategy = 'ddp' if (accelerator == 'gpu' and devices * num_nodes > 1) else 'auto'
+    world_size = int(os.environ.get('SLURM_NTASKS', 1))
+    strategy = 'ddp' if (accelerator == 'gpu' and world_size > 1) else 'auto'
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
