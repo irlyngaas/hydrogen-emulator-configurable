@@ -7,6 +7,7 @@
 #SBATCH -p batch
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1   # up to 8 for more GPUs on this node (Frontier has 8 GCDs/node); raise -N too for multiple nodes
+#SBATCH --gpus-per-node=1     # keep this equal to --ntasks-per-node above -- see note below on why this differs from emulator-1ts's script
 
 # Same modules used to build the environment -- must be reloaded here since
 # each SLURM job starts with a fresh environment, not whatever was loaded
@@ -36,11 +37,25 @@ mkdir -p logs
 # train.py derives devices=/num_nodes= from SLURM_NTASKS_PER_NODE/SLURM_NNODES
 # directly, falling back to 1/1 (today's working single-process behavior)
 # whenever these aren't set at all -- no code changes needed to go from 1 GPU
-# to many, just the #SBATCH lines above. Lightning's own SLURM-aware DDP
-# strategy (auto-detected from being launched via srun with SLURM_NTASKS set)
-# handles rank/process-group setup and the one-visible-GPU-per-task device
-# mapping itself -- none of emulator-1ts's hand-rolled main.py correction
-# work applies here.
+# to many, just the #SBATCH lines above.
+#
+# IMPORTANT, and the opposite of emulator-1ts's script: do NOT use
+# --gpus-per-task/--gpu-bind=closest here. emulator-1ts's hand-rolled DDP
+# code specifically needs SLURM to restrict each task to seeing only 1 GPU
+# (so it can do its own local_rank % device_count() mapping), but Lightning's
+# SLURM integration is designed the opposite way -- it expects every process
+# to see ALL GPUs on the node and picks the correct one itself internally via
+# SLURM_LOCALID. Mixing the two conventions produces two mutually exclusive
+# Lightning-internal errors (confirmed by actually running both ways):
+#   --gpus-per-task=1 --gpu-bind=closest -> CUDAAccelerator.parse_devices()
+#     fails ("You requested gpu: [0..7] But your machine only has: [0]")
+#   devices=1 without per-task GPU restriction -> SLURMEnvironment.
+#     validate_settings() fails ("devices=1 ... does not match ... HINT:
+#     Set devices=8")
+# This is a known Lightning/SLURM compatibility conflict (Lightning-AI/
+# pytorch-lightning#16828), not something specific to this setup --
+# requesting GPUs at the node level instead (--gpus-per-node=N at both
+# #SBATCH and srun) keeps all N visible to every task, resolving both.
 #
 # MASTER_ADDR/MASTER_PORT: Lightning's SLURMEnvironment resolves the main
 # node's address itself via the same scontrol-based approach, but setting it
@@ -57,7 +72,7 @@ export MASTER_PORT=3442
 # module search path.
 cd /lustre/orion/stf006/proj-shared/irl1/hydrogen-emulator-configurable
 
-srun -N$SLURM_NNODES -n$SLURM_NTASKS -c7 --gpus-per-task=1 --gpu-bind=closest \
+srun -N$SLURM_NNODES -n$SLURM_NTASKS -c7 --gpus-per-node=$SLURM_GPUS_PER_NODE \
     python3 -u -m emulator_configurable.main \
         --mode train --domain subsurface \
         --config emulator_configurable/conus1_boxtest_config.json

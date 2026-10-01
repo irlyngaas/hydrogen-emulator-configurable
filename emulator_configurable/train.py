@@ -128,21 +128,30 @@ def train_model(
     # Lightning's accelerator wants 'cpu'/'gpu'/'auto', not a raw device
     # string like 'cuda:0'.
     #
-    # devices= must be 1, not the GPU-per-node count: confirmed by actually
-    # running an 8-task job --
-    #   "MisconfigurationException: You requested gpu: [0,1,2,3,4,5,6,7]
-    #    But your machine only has: [0]"
-    # -- devices=N literally asks THIS process to see/use N local GPU
-    # indices, but --gpus-per-task=1 --gpu-bind=closest (the launch flags
-    # run_conus1_forcedstrnn_training.slurm uses, same as emulator-1ts's
-    # script) restricts each process to exactly ONE visible GPU, always
-    # index 0. The 8-way parallelism comes entirely from there being 8
-    # separately-launched srun tasks, which Lightning's SLURM-aware
-    # environment detects on its own directly from SLURM_NTASKS/
-    # SLURM_PROCID/SLURM_LOCALID -- independent of whatever devices= says.
+    # devices= must equal SLURM_NTASKS_PER_NODE, not 1 -- this went through
+    # two wrong guesses before landing here, both confirmed by actually
+    # submitting jobs:
+    #   devices=<ntasks-per-node> with --gpus-per-task=1 --gpu-bind=closest:
+    #     CUDAAccelerator.parse_devices() fails ("You requested gpu:
+    #     [0..7] But your machine only has: [0]"), since gpu-bind restricts
+    #     each process to exactly 1 visible GPU.
+    #   devices=1 (still with --gpus-per-task=1 --gpu-bind=closest):
+    #     SLURMEnvironment.validate_settings() fails instead ("devices=1 ...
+    #     does not match ... HINT: Set devices=8").
+    # These two Lightning-internal checks are mutually exclusive under
+    # per-task GPU-visibility restriction -- a known Lightning/SLURM
+    # compatibility conflict (Lightning-AI/pytorch-lightning#16828), not
+    # something specific to this setup. The actual fix is in the SLURM
+    # script: request GPUs at the node level (--gpus-per-node, no
+    # --gpus-per-task/--gpu-bind) so all of them stay visible to every
+    # process, and devices= really does equal SLURM_NTASKS_PER_NODE --
+    # Lightning's own SLURM-aware strategy then picks the correct one per
+    # process internally via SLURM_LOCALID, unlike emulator-1ts's
+    # hand-rolled main.py, which needed --gpus-per-task=1 specifically so
+    # its own local_rank % device_count() correction had something to do.
     if str(device).startswith('cuda'):
         accelerator = 'gpu'
-        devices = 1
+        devices = int(os.environ.get('SLURM_NTASKS_PER_NODE', 1))
         num_nodes = int(os.environ.get('SLURM_NNODES', 1))
     else:
         accelerator = 'cpu'
