@@ -12,9 +12,9 @@ from pprint import pprint
 from . import scalers
 from .utils import (
     maybe_split_3d_vars,
-    try_get_checkpoint,
     save_predictions
 )
+from .mlflow_utils import try_get_checkpoint
 
 def predict_surface(
     config: dict,
@@ -48,8 +48,14 @@ def predict_subsurface(
     ds = xr.open_mfdataset(config['inference_dataset_files'], engine='zarr').bfill('time')
     ds = maybe_split_3d_vars(ds).isel(**selectors)
 
+    # Imported here, not at module level, since inference.py pulls in
+    # data_loader.py (torchdata.datapipes, an API deprecated/removed in
+    # current torchdata releases) -- training no longer needs any of that,
+    # so it shouldn't be a hard import-time requirement just to use this file.
+    from . import inference
+
     # Run inference
-    pred_ds = emulator.inference.run_subsurface_inference(ds, **config)
+    pred_ds = inference.run_subsurface_inference(ds, **config)
 
     # Save the results
     if 'save_path' in config:

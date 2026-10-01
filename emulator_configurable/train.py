@@ -1,43 +1,42 @@
+import shutil
 import torch
 import pytorch_lightning as pl
 
 from typing import List, Union, Optional
-from .data_loader import create_new_loader
+from torch.utils.data import DataLoader
 from .model_builder import model_setup
+from .pfb_dataset import ParFlowSequenceDataset
+from .scalers import create_scalers_from_yaml
 from pytorch_lightning.callbacks import (
     Callback,
     ModelCheckpoint,
     LearningRateMonitor
 )
-from .utils import (
-    MetricsCallback,
-    get_checkpoint_from_database,
-    get_checkpoint_from_local_logs
-)
+from .utils import MetricsCallback
 
 def train_model(
     run_name: str,
     model_type: str,
     model_config: dict,
-    forcings: List[str],
-    parameters: List[str],
-    states: List[str],
-    targets: List[str],
-    train_dataset_files: List[str],
+    data_dir: str,
+    parameter_list: List[str],
+    param_nlayer: List[int],
     patch_size: int,
+    overlap: int,
     max_epochs: int,
     learning_rate: float,
     sequence_length: int,
     *,
+    n_evaptrans: int=0,
     batch_size: int=1,
     num_workers: int=1,
     precision: str='16',
-    resume_from_checkpoint: Union[bool, str]=False,
+    resume_from_checkpoint: Optional[str]=None,
     gradient_loss_penalty: bool=True,
     logging_frequency: int=10,
     callbacks: List[Callback]=[],
     device: Union[torch.device, str]='cuda',
-    logging_location: str='https://concord.princeton.edu/mlflow/',
+    logging_location: str='./logs',
     scaler_file: Optional[str]=None,
     config_file: Optional[str]=None
 ):
@@ -52,30 +51,27 @@ def train_model(
     )
     callbacks = [lr_monitor, metrics, checkpoint]
 
-    # Get the checkpoint if we're resuming a training run
-    if resume_from_checkpoint and isinstance(resume_from_checkpoint, bool):
-        ckpt_path = get_checkpoint_from_database(
-            run_name,
-            logging_location
-        )
-    elif resume_from_checkpoint and isinstance(resume_from_checkpoint, str):
-        ckpt_path = get_checkpoint_from_local_logs(
-            run_name,
-            logging_location,
-            resume_from_checkpoint
-        )
-    else:
-        ckpt_path = None
+    # resume_from_checkpoint is now just a local .ckpt path (or None) --
+    # the MLflow-database-lookup option is gone along with the MLflow logger
+    # below, since this path has no tracking server to query.
+    ckpt_path = resume_from_checkpoint
 
-    # Set up logging
-    logger = pl.loggers.MLFlowLogger(
-        experiment_name=run_name,
-        tracking_uri=logging_location,
-        log_model=True
+    # Local, file-based logging -- no tracking server/credentials required.
+    # logging_location is a local directory (PyTorch Lightning's CSVLogger
+    # writes metrics.csv + hparams.yaml under
+    # <logging_location>/<run_name>/version_N/).
+    logger = pl.loggers.CSVLogger(
+        save_dir=logging_location,
+        name=run_name,
     )
-    logger.log_hyperparams(locals())
+    logger.log_hyperparams({
+        k: v for k, v in locals().items()
+        if k not in ('logger', 'callbacks') and isinstance(v, (int, float, str, bool))
+    })
     if config_file:
-        logger.experiment.log_artifact(logger.run_id, config_file, )
+        # CSVLogger has no artifact store like MLflow's -- just copy the
+        # config alongside the run's own log directory instead.
+        shutil.copy(config_file, logger.log_dir)
 
     # Set up the model 
     model = model_setup(
@@ -85,26 +81,41 @@ def train_model(
         gradient_loss_penalty=gradient_loss_penalty,
     ).to(device)
 
-    # Create the data loading pipeline
-    data_loader = create_new_loader(
-        files=train_dataset_files,
-        nt=sequence_length,
-        ny=patch_size,
-        nx=patch_size,
-        forcings=forcings,
-        parameters=parameters,
-        states=states,
-        targets=targets,
+    # Create the data loading pipeline. ForcedSTRNN has no built-in
+    # scale_pressure/scale_statics/scale_evaptrans the way emulator-1ts's
+    # ResNet does, so scaling happens inside the dataset itself here instead
+    # of upstream in a data pipe.
+    scalers = create_scalers_from_yaml(scaler_file) if scaler_file else None
+    dataset = ParFlowSequenceDataset(
+        data_dir=data_dir,
+        run_name=run_name,
+        parameter_list=parameter_list,
+        patch_size=patch_size,
+        overlap=overlap,
+        param_nlayer=param_nlayer,
+        sequence_length=sequence_length,
+        n_evaptrans=n_evaptrans,
+        scalers=scalers,
+    )
+    data_loader = DataLoader(
+        dataset,
         batch_size=batch_size,
-        num_workers=num_workers,
         shuffle=True,
-        selectors={},
-        scaler_file=scaler_file
+        num_workers=num_workers,
     )
 
-    # Configure the trainer. 
+    # Configure the trainer.
+    # Lightning's accelerator wants 'cpu'/'gpu'/'auto', not a raw device
+    # string like 'cuda:0' -- devices= picks which/how many separately.
+    if str(device).startswith('cuda'):
+        accelerator = 'gpu'
+        devices = [int(str(device).split(':')[1])] if ':' in str(device) else 1
+    else:
+        accelerator = 'cpu'
+        devices = 1
     trainer = pl.Trainer(
-        accelerator=device,
+        accelerator=accelerator,
+        devices=devices,
         callbacks=callbacks,
         precision=precision,
         max_epochs=max_epochs,
