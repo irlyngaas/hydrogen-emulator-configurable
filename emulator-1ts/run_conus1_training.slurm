@@ -6,6 +6,7 @@
 #SBATCH -t 00:30:00
 #SBATCH -p batch
 #SBATCH -N 1
+#SBATCH --ntasks-per-node=1   # up to 8 for more GPUs on this node (Frontier has 8 GCDs/node); raise -N too for multiple nodes
 
 # Same modules used to build the environment -- must be reloaded here since
 # each SLURM job starts with a fresh environment, not whatever was loaded
@@ -28,10 +29,17 @@ mkdir -p ${MIOPEN_USER_DB_PATH}
 
 mkdir -p logs
 
+# Needed for torch.distributed's rendezvous (env:// init method), even when
+# running a single task/GPU -- main.py falls back to ordinary non-distributed
+# training automatically whenever SLURM_NTASKS is 1, no script changes needed
+# to go from 1 GPU to many, just the #SBATCH lines above.
+export MASTER_ADDR=$(hostname -i)
+export MASTER_PORT=3442
+
 # main.py uses bare local imports (from dataset import ..., from model
 # import ..., etc.) so it must be run with emulator-1ts/ as the working
 # directory, not invoked by path from elsewhere.
 cd /lustre/orion/stf006/proj-shared/irl1/hydrogen-emulator-configurable/emulator-1ts
 
-srun -N1 -n1 -c7 --gpus-per-task=1 --gpu-bind=closest \
+srun -N$SLURM_NNODES -n$SLURM_NTASKS -c7 --gpus-per-task=1 --gpu-bind=closest \
     python3 -u main.py --config conus1_boxtest_config.yaml --mode train

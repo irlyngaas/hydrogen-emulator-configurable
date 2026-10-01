@@ -17,6 +17,11 @@ def train_epoch(
     # Trains 1 epoch
     # TODO: Track losses
     prefix = 'train' if train else 'valid'
+    # DistributedDataParallel only forwards forward()/__call__ to the
+    # wrapped module -- custom methods like scale_pressure have to be
+    # called through .module explicitly (a no-op indirection when model
+    # isn't DDP-wrapped, since then it has no .module attribute at all)
+    raw_model = model.module if hasattr(model, 'module') else model
     for i, batch in enumerate(dataset):
         state, evaptrans, params, y = batch
         state = state.to(device=device, non_blocking=True)
@@ -25,10 +30,10 @@ def train_epoch(
         y = y.to(device=device, non_blocking=True)
         y = y.squeeze()
 
-        model.scale_pressure(state)
-        model.scale_evaptrans(evaptrans)
-        model.scale_statics(params)
-        model.scale_pressure(y)
+        raw_model.scale_pressure(state)
+        raw_model.scale_evaptrans(evaptrans)
+        raw_model.scale_statics(params)
+        raw_model.scale_pressure(y)
 
 
         # TODO: Do scaling here
@@ -57,18 +62,24 @@ def train_epoch(
     return pd.Series({f'{prefix}_loss': loss.item()})
 
 def train_model(
-    model, 
-    train_dl, 
-    opt, 
-    loss_fun, 
+    model,
+    train_dl,
+    opt,
+    loss_fun,
     max_epochs,
     scheduler=None,
-    val_dl=None, 
-    device=DEVICE, 
-    dtype=DTYPE
+    val_dl=None,
+    device=DEVICE,
+    dtype=DTYPE,
+    sampler=None,
 ):
     train_df, valid_df = pd.DataFrame(), pd.DataFrame()
     for e in (bar := tqdm(range(max_epochs))):
+        if sampler is not None:
+            # Required so DistributedSampler reshuffles differently each
+            # epoch -- without this every epoch uses the same per-rank
+            # ordering
+            sampler.set_epoch(e)
         # Make sure to turn on train mode here
         # so that we update parameters
         model.train()
