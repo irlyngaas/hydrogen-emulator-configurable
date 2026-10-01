@@ -74,11 +74,19 @@ def train(
     is_main_process = rank == 0
 
     if distributed:
-        # Each process owns exactly one GPU, picked by local_rank -- the
-        # device: value in the config is ignored in this case, since using
-        # it verbatim for every process would put every rank on the same GPU
-        device = f'cuda:{local_rank}'
-        torch.cuda.set_device(local_rank)
+        # With --gpus-per-task=1 --gpu-bind=closest (what run_conus1_training.slurm
+        # uses), each process only ever sees ONE GPU, always at index 0 from
+        # its own vantage point -- torch.cuda.set_device(local_rank) directly
+        # fails for any rank > 0 with "invalid device ordinal" in that case.
+        # Without per-task binding, every process sees all GPUs on the node
+        # and needs local_rank to pick its own. The modulo handles both:
+        # local_gpu_id is always 0 when only one GPU is visible, and the
+        # correct distinct index when all are.
+        local_gpu_id = local_rank % torch.cuda.device_count()
+        # The device: value in the config is ignored here, since using it
+        # verbatim for every process would put every rank on the same GPU
+        device = f'cuda:{local_gpu_id}'
+        torch.cuda.set_device(local_gpu_id)
         dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
     # Create the data loader

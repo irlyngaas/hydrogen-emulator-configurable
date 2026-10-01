@@ -33,7 +33,11 @@ mkdir -p logs
 # running a single task/GPU -- main.py falls back to ordinary non-distributed
 # training automatically whenever SLURM_NTASKS is 1, no script changes needed
 # to go from 1 GPU to many, just the #SBATCH lines above.
-export MASTER_ADDR=$(hostname -i)
+# `hostname -i` is unreliable across cluster network configs (returned an
+# address PyTorch's TCP rendezvous rejected as an unsupported family here) --
+# resolving the allocation's first node name via scontrol is the more robust
+# standard pattern, and works the same whether this is 1 node or several.
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=3442
 
 # main.py uses bare local imports (from dataset import ..., from model
