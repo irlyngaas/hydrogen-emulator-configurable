@@ -1,3 +1,4 @@
+import os
 import shutil
 import torch
 import pytorch_lightning as pl
@@ -73,13 +74,19 @@ def train_model(
         # config alongside the run's own log directory instead.
         shutil.copy(config_file, logger.log_dir)
 
-    # Set up the model 
+    # Set up the model. device=None disables model_setup's own internal
+    # model.to(device) call (it otherwise defaults to a hardcoded 'cuda'
+    # regardless of what's passed in here) -- under DDP, Lightning has to
+    # own device placement itself; manually pre-moving the model to one
+    # hardcoded device before trainer.fit() would put every process's model
+    # on the same GPU instead of letting each process get its own.
     model = model_setup(
         model_type=model_type,
         model_config=model_config,
         learning_rate=learning_rate,
         gradient_loss_penalty=gradient_loss_penalty,
-    ).to(device)
+        device=None,
+    )
 
     # Create the data loading pipeline. ForcedSTRNN has no built-in
     # scale_pressure/scale_statics/scale_evaptrans the way emulator-1ts's
@@ -106,16 +113,34 @@ def train_model(
 
     # Configure the trainer.
     # Lightning's accelerator wants 'cpu'/'gpu'/'auto', not a raw device
-    # string like 'cuda:0' -- devices= picks which/how many separately.
+    # string like 'cuda:0'. devices=/num_nodes= describe GPUs-per-node and
+    # node count; derived from SLURM's own env vars (set by sbatch/srun, so
+    # these fall back to 1/1 -- today's single-process behavior, unchanged --
+    # whenever this isn't running under SLURM at all, exactly like the plain
+    # interactive run that already worked).
+    #
+    # Launched via srun with one task per GPU (--gpus-per-task=1
+    # --gpu-bind=closest, same pattern as emulator-1ts's
+    # run_conus1_training.slurm), Lightning's SLURM-aware DDP strategy
+    # handles rank/local-rank/process-group setup itself, including mapping
+    # each process's one visible GPU correctly -- unlike emulator-1ts's
+    # hand-rolled main.py, none of the local_rank % device_count() correction
+    # work from that effort needs repeating here; Lightning's SLURM
+    # integration already does the equivalent internally.
     if str(device).startswith('cuda'):
         accelerator = 'gpu'
-        devices = [int(str(device).split(':')[1])] if ':' in str(device) else 1
+        devices = int(os.environ.get('SLURM_NTASKS_PER_NODE', 1))
+        num_nodes = int(os.environ.get('SLURM_NNODES', 1))
     else:
         accelerator = 'cpu'
         devices = 1
+        num_nodes = 1
+    strategy = 'ddp' if (accelerator == 'gpu' and devices * num_nodes > 1) else 'auto'
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
+        num_nodes=num_nodes,
+        strategy=strategy,
         callbacks=callbacks,
         precision=precision,
         max_epochs=max_epochs,

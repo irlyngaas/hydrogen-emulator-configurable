@@ -22,8 +22,12 @@ export LD_LIBRARY_PATH=$CRAY_LD_LIBRARY_PATH:$LD_LIBRARY_PATH
 
 conda activate /lustre/orion/stf006/proj-shared/irl1/MINI_CLEAN/envs/groundwater-emulator
 
-# Avoids MIOpen disk-cache contention/I/O errors on shared filesystems
-export MIOPEN_USER_DB_PATH="/tmp/my-miopen-cache-$SLURM_JOB_ID"
+# /tmp is node-local and can carry permission-mismatched leftovers from
+# other jobs that previously ran on the same compute node (hit exactly this
+# running emulator_configurable interactively: "Permission denied
+# [/tmp/.cache/miopen/...]") -- Lustre project space avoids that class of
+# problem entirely, at some cost to kernel-cache read/write latency.
+export MIOPEN_USER_DB_PATH="/lustre/orion/stf006/proj-shared/irl1/miopen_cache"
 export MIOPEN_CUSTOM_CACHE_DIR=${MIOPEN_USER_DB_PATH}
 mkdir -p ${MIOPEN_USER_DB_PATH}
 
