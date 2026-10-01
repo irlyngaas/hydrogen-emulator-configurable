@@ -1,0 +1,29 @@
+{
+    "run_name": "CONUS1_boxtest_conus1_baseline_mod_2002-10-01",
+    "model_type": "ForcedSTRNN",
+    "model_config": {
+        "num_layers": 2,
+        "num_hidden": [16, 16],
+        "img_channel": 5,
+        "act_channel": 1,
+        "init_cond_channel": 5,
+        "static_channel": 37,
+        "out_channel": 5
+    },
+    "data_dir": "/lustre/orion/stf006/proj-shared/irl1/hydrogen-data",
+    "parameter_list": ["slope_x", "slope_y", "pme", "ss_pressure_head", "pf_indicator", "porosity", "permeability", "van_genuchten_alpha", "van_genuchten_n"],
+    "param_nlayer": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "n_evaptrans": 1,
+    "patch_size": 16,
+    "overlap": 4,
+    "sequence_length": 3,
+    "max_epochs": 5,
+    "learning_rate": 0.001,
+    "batch_size": 2,
+    "num_workers": 1,
+    "precision": "32",
+    "device": "cuda:0",
+    "logging_location": "/lustre/orion/stf006/proj-shared/irl1/hydrogen-emulator-runs",
+    "scaler_file": "FILL_IN_PATH_TO_reformat_conus1_scalers.py_OUTPUT",
+    "gradient_loss_penalty": true
+}
