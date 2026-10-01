@@ -28,7 +28,13 @@ def train_epoch(
         evaptrans = evaptrans.to(device, non_blocking=True)
         params = params.to(device, non_blocking=True)
         y = y.to(device=device, non_blocking=True)
-        y = y.squeeze()
+        # No .squeeze() here: it strips every singleton dim, including the
+        # batch dim itself when a batch happens to have exactly 1 sample
+        # (e.g. DistributedSampler's padding can make every rank's last
+        # batch of an epoch the same small leftover size) -- scale_pressure/
+        # scale_evaptrans/scale_statics all hardcode 4-index access assuming
+        # the batch dim is always present, which custom_collate's
+        # torch.stack already guarantees without any squeezing needed.
 
         raw_model.scale_pressure(state)
         raw_model.scale_evaptrans(evaptrans)
@@ -40,13 +46,16 @@ def train_epoch(
 
         if not len(state): continue
         optimizer.zero_grad()
+        # No .squeeze() here either, for the same reason as y above -- it'd
+        # collapse yhat to 3D on a size-1 batch while y stays 4D, breaking
+        # loss_fn(yhat, y) with a shape mismatch instead of fixing anything
         if train:
-            yhat = model(state, evaptrans, params).squeeze()
+            yhat = model(state, evaptrans, params)
         else:
             # Don't compute gradients
             # Saves on computation
             with torch.no_grad():
-                yhat = model(state, evaptrans, params).squeeze()
+                yhat = model(state, evaptrans, params)
         if torch.isnan(yhat).any():
             print()
             print(torch.isnan(state).sum(), torch.isnan(yhat).sum())
