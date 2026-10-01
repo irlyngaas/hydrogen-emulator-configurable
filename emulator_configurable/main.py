@@ -14,7 +14,6 @@ from .utils import (
     maybe_split_3d_vars,
     save_predictions
 )
-from .mlflow_utils import try_get_checkpoint
 
 def predict_surface(
     config: dict,
@@ -34,11 +33,16 @@ def predict_subsurface(
     Returns:
         pred_ds (xarray.Dataset): The predicted subsurface dataset.
     """
+    # Imported here, not at module level -- same reasoning as the inference
+    # import below, so that mlflow isn't a hard import-time requirement just
+    # to use this file (e.g. for training, which never calls this function).
+    from .mlflow_utils import try_get_checkpoint
+
     # Get the model weights
     checkpoint_location = config.get('logging_location', 'https://concord.princeton.edu/mlflow/')
     model_weights_file = try_get_checkpoint(
         config['run_name'],
-        checkpoint_location, 
+        checkpoint_location,
         checkpoint_dir=config.get('checkpoint_dir', '.')
     )
     config['model_weights'] = torch.load(model_weights_file)['state_dict']
