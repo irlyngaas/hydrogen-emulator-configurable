@@ -127,7 +127,12 @@ def train(
     model = model.to(device).to(dtype)
 
     if distributed:
-        model = DDP(model, device_ids=[local_rank])
+        # Must be local_gpu_id, not local_rank -- DDP uses device_ids directly
+        # to pick the target device for moving forward-pass inputs (including
+        # indexing its own internal per-visible-device stream cache), so the
+        # same local_rank-vs-visible-device-count mismatch from set_device()
+        # above applies here too.
+        model = DDP(model, device_ids=[local_gpu_id])
 
     # Create the optimizer and loss function
     optimizer = get_optimizer(optimizer, model, lr)
