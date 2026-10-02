@@ -31,7 +31,6 @@ dependencies:
   - seaborn
   - numcodecs
   - xbatcher
-  - scikit-learn  # needed by pi3nn_torch (train_test_split, StandardScaler)
   - pip
   - pip:
     - pftools
