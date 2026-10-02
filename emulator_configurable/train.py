@@ -181,4 +181,9 @@ def train_model(
         ckpt_path=ckpt_path
     )
 
-    logger.finalize()
+    # This Lightning version's Logger.finalize() requires a status string
+    # (confirmed: "TypeError: CSVLogger.finalize() missing 1 required
+    # positional argument: 'status'" -- happened after training had already
+    # completed successfully through all max_epochs, so purely cosmetic,
+    # but worth fixing so logs flush cleanly and the process exits 0).
+    logger.finalize('success')
