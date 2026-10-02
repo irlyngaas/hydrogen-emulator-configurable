@@ -5,9 +5,9 @@
 #SBATCH -e logs/conus1_forcedstrnn-%j.e
 #SBATCH -t 00:30:00
 #SBATCH -p batch
-#SBATCH -N 1
-#SBATCH --ntasks-per-node=1   # up to 8 for more GPUs on this node (Frontier has 8 GCDs/node); raise -N too for multiple nodes
-#SBATCH --gpus-per-node=1     # keep this equal to --ntasks-per-node above -- see note below on why this differs from emulator-1ts's script
+#SBATCH -N 2
+#SBATCH --ntasks-per-node=8   # up to 8 for more GPUs on this node (Frontier has 8 GCDs/node)
+#SBATCH --gpus-per-node=8     # keep this equal to --ntasks-per-node above -- see note below on why this differs from emulator-1ts's script
 
 # Same modules used to build the environment -- must be reloaded here since
 # each SLURM job starts with a fresh environment, not whatever was loaded
