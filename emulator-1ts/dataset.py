@@ -17,10 +17,11 @@ class ParFlowDataset(Dataset):
 
     def __init__(
         self, data_dir, run_name,
-        parameter_list, patch_size, overlap, 
-        param_nlayer, n_evaptrans=0, dtype=torch.float64
+        parameter_list, patch_size, overlap,
+        param_nlayer, n_evaptrans=0, dtype=torch.float64,
+        valid_fraction=0.0, split='train'
     ):
-        super().__init__() 
+        super().__init__()
         self.base_dir = f'{data_dir}/{run_name}'
         self.parameter_list = parameter_list
         self.param_nlayer = param_nlayer #number of layers to use for each param, 0= use all, -n = n top layers, +n = n bottom layers
@@ -29,12 +30,24 @@ class ParFlowDataset(Dataset):
         self.overlap = overlap
         self.dtype = dtype
 
-        self.pressure_files = sorted(glob(f'{self.base_dir}/transient/pressure*.pfb')) 
+        self.pressure_files = sorted(glob(f'{self.base_dir}/transient/pressure*.pfb'))
         self.pressure_files = {
             't': self.pressure_files[0:-1],
             't+1': self.pressure_files[1:]
         }
-    
+
+        # Time-based train/valid split: earliest (1-valid_fraction) of
+        # transient timesteps = train, latest valid_fraction = valid.
+        # valid_fraction=0.0 (default) is a no-op slice, so every existing
+        # config/call site that doesn't pass these two kwargs sees exactly
+        # today's behavior (the full dataset, unsplit).
+        if valid_fraction > 0:
+            n = len(self.pressure_files['t'])
+            n_valid = max(1, int(round(n * valid_fraction)))
+            n_train = n - n_valid
+            sl = slice(0, n_train) if split == 'train' else slice(n_train, n)
+            self.pressure_files = {k: v[sl] for k, v in self.pressure_files.items()}
+
         self.size_test = read_pfb(self.pressure_files['t'][0])
         self.X_EXTENT = self.size_test.shape[2] 
         self.Y_EXTENT = self.size_test.shape[1]

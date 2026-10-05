@@ -1,0 +1,40 @@
+name: test_pi3nn
+log_location: /home/lc2465/NAIRR/test_training
+batch_size: 4 # small for testing
+num_workers: 1
+device: cpu
+dtype: float64
+valid_fraction: 0.1 # time-based split: earliest 90% of timesteps = train, latest 10% = valid
+data_def:
+  data_dir: /home/lc2465/NAIRR/ #Directory that contains the training data run
+  run_name: CONUS2.1_boxtest_conus2_baseline_2002-10-01 # name of training data run
+  parameter_list: ['slope_x', 'slope_y', 'permeability_x', 'permeability_y' , 'permeability_z', 'porosity', 'pf_flowbarrier', 'mannings', 'specific_storage', 'sres' , 'ssat', 'vg_n', 'vg_alpha']
+  patch_size: 16   #Training patch size from within the training domain
+  overlap: 4
+  scaler_yaml: /home/lc2465/NAIRR/hydrogen-emulator-1ts/emulator-1ts/default_scalers_original_pressure.yaml
+  param_nlayer: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  n_evaptrans: 4
+model_def:
+  in_channels: 117 # Number of input channels (same for net_mean/net_up/net_down -- see pi3nn/networks.py)
+  out_channels: 10 # Number of output channels (depth layers) -- v1 uses one shared multi-output net_up/net_down across all of these
+  kernel_size: 3
+  depth: 3
+pi3nn_configs:
+  quantile: 0.95
+  max_epochs:
+    mean: 100
+    up: 100
+    down: 100
+  lr:
+    mean: 0.001
+    up: 0.001
+    down: 0.001
+  optimizers:
+    mean: adam
+    up: adam
+    down: adam
+  early_stop: true
+  early_stop_start_epoch: 5
+  wait_patience: 10
+  restore_best_weights: true
+  verbose: 1
