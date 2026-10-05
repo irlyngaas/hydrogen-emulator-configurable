@@ -31,8 +31,11 @@ Two modes:
       actually fires, splits data into two ranks with DELIBERATELY
       uneven mask counts, and asserts the resulting (DDP-averaged)
       gradient matches a single-process reference computed on the full,
-      unsharded data with the same (pre-update) weights. Run under
-      torchrun with exactly 2 processes.
+      unsharded data with the same (pre-update) weights. Run with
+      exactly 2 processes -- via srun (reads SLURM's env vars, same as
+      every other distributed launch in this project -- see
+      run_pi3nn_validate.slurm) or via torchrun for ad hoc local testing
+      without SLURM.
 
 Usage (run from emulator-1ts/ as a module, same convention as the
 validated flat port's `python3 -m pi3nn_torch.run_boston_comparison`):
@@ -40,6 +43,7 @@ validated flat port's `python3 -m pi3nn_torch.run_boston_comparison`):
   torchrun --nproc_per_node=2 --standalone -m pi3nn.validate_synthetic --mode ddp_loss
 """
 import argparse
+import os
 
 import torch
 import torch.distributed as dist
@@ -162,11 +166,27 @@ def run_full():
     print('PASS: full pipeline sanity checks.')
 
 
+def get_distributed_info():
+    """Inlined copy of main.py's get_distributed_info -- see
+    custom_collate's docstring above for why this isn't imported from
+    main.py directly. Reads SLURM's env vars (what run_pi3nn_validate.slurm
+    launches with via srun, matching every other distributed launch in
+    this project) or torchrun's (RANK/WORLD_SIZE/LOCAL_RANK, for ad hoc
+    local testing without SLURM)."""
+    if 'WORLD_SIZE' in os.environ:
+        return int(os.environ['RANK']), int(os.environ['WORLD_SIZE']), int(os.environ['LOCAL_RANK'])
+    elif 'SLURM_NTASKS' in os.environ:
+        return int(os.environ['SLURM_PROCID']), int(os.environ['SLURM_NTASKS']), int(os.environ['SLURM_LOCALID'])
+    return 0, 1, 0
+
+
 def run_ddp_loss_check():
-    dist.init_process_group(backend='gloo')
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    assert world_size == 2, 'run_ddp_loss_check expects exactly 2 processes (torchrun --nproc_per_node=2)'
+    rank, world_size, _ = get_distributed_info()
+    # gloo's env:// rendezvous still needs MASTER_ADDR/MASTER_PORT set
+    # (by the launcher, same as run_pi3nn_validate.slurm's srun does via
+    # scontrol) even though rank/world_size are passed explicitly here.
+    dist.init_process_group(backend='gloo', rank=rank, world_size=world_size)
+    assert world_size == 2, 'run_ddp_loss_check expects exactly 2 processes (srun -n2, or torchrun --nproc_per_node=2 for local testing)'
 
     torch.manual_seed(0)
     full_x = torch.randn(40, dtype=torch.float64)
