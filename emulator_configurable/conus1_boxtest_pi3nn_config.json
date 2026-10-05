@@ -1,0 +1,50 @@
+{
+    "run_name": "CONUS1_boxtest_pi3nn",
+    "data_dir": "/lustre/orion/stf006/proj-shared/irl1/hydrogen-data",
+    "parameter_list": ["slope_x", "slope_y", "pme", "ss_pressure_head", "pf_indicator", "porosity", "permeability", "van_genuchten_alpha", "van_genuchten_n"],
+    "param_nlayer": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "n_evaptrans": 1,
+    "patch_size": 16,
+    "overlap": 4,
+    "sequence_length": 3,
+    "batch_size": 2,
+    "num_workers": 1,
+    "precision": "32",
+    "device": "cuda:0",
+    "logging_location": "/lustre/orion/stf006/proj-shared/irl1/hydrogen-emulator-runs",
+    "scaler_file": "FILL_IN_PATH_TO_reformat_conus1_scalers.py_OUTPUT",
+    "gradient_loss_penalty": true,
+
+    "valid_fraction": 0.15,
+    "quantile": 0.9,
+    "early_stopping_patience": 10,
+
+    "mean_model_config": {
+        "num_layers": 2,
+        "num_hidden": [16, 16],
+        "img_channel": 5,
+        "act_channel": 1,
+        "init_cond_channel": 5,
+        "static_channel": 37,
+        "out_channel": 5
+    },
+    "max_epochs": {"mean": 40, "up": 40, "down": 40},
+    "learning_rate": {"mean": 0.001, "up": 0.001, "down": 0.001},
+
+    "updown_model_config": {
+        "stateless_output": {
+            "act_channel": 1, "static_channel": 37, "out_channel": 5,
+            "hidden_dim": 32, "kernel_size": 5, "depth": 1, "bias_init": 3.0, "eps": 0.2
+        },
+        "stateless_hidden": {
+            "act_channel": 1, "static_channel": 37, "out_channel": 5,
+            "hidden_state_channel": 16,
+            "hidden_dim": 32, "kernel_size": 5, "depth": 1, "bias_init": 3.0, "eps": 0.2
+        },
+        "recurrent_clone": {
+            "num_layers": 2, "num_hidden": [16, 16], "act_channel": 1,
+            "init_cond_channel": 5, "static_channel": 37, "out_channel": 5,
+            "filter_size": 5, "stride": 1, "bias_init": 3.0, "eps": 0.2
+        }
+    }
+}

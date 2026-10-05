@@ -144,11 +144,12 @@ class ForcedSTRNN(pl.LightningModule):
     def calc_decouple_loss(self, c, m):
         return torch.mean(torch.abs(torch.cosine_similarity(c, m, dim=2)))
 
-    def forward(self, forcings, init_cond, static_inputs):
+    def forward(self, forcings, init_cond, static_inputs, return_hidden=False):
         batch, timesteps, channels, height, width = forcings.shape
 
         # Initialize list of states
         next_frames = []
+        hidden_frames = [] if return_hidden else None
         h_t = []
         c_t = []
         delta_c_list = []
@@ -185,10 +186,19 @@ class ForcedSTRNN(pl.LightningModule):
 
             x = self.conv_last(h_t[-1]) + x
             next_frames.append(x)
-        
-        self.decouple_loss = torch.mean(torch.stack(decouple_loss, dim=0))
+            if return_hidden:
+                hidden_frames.append(h_t[-1])
+
+        # decouple_loss is only ever appended to for layers 1..num_layers-1
+        # (it's a cross-layer decoupling term) -- with num_layers=1 there's
+        # no second layer to decouple against, so the list is empty and
+        # torch.stack would crash. 0 is the structurally correct value
+        # here (no decoupling term applies), not an arbitrary default.
+        self.decouple_loss = torch.mean(torch.stack(decouple_loss, dim=0)) if decouple_loss else torch.zeros((), device=x.device)
         # Stack to: [batch, length, channel, height, width]
         next_frames = torch.stack(next_frames, dim=1)
+        if return_hidden:
+            return next_frames, torch.stack(hidden_frames, dim=1)
         return next_frames
 
     def training_step(self, train_batch, train_batch_idx):

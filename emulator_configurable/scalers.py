@@ -2,12 +2,18 @@ import os
 import numpy as np
 import scipy.stats
 import torch
-import xarray as xr
 import pickle
 import dill
 import yaml
 import torch.nn.functional as F
 from . import utils
+
+# xarray is lazily imported inside OneHotScaler.transform, the only place
+# it's used -- this module is imported unconditionally by train.py and
+# transitively by emulator_configurable/__init__.py, so forcing it at
+# package-import time would break anything that imports this package
+# without needing OneHotScaler specifically (e.g. pi3nn's synthetic
+# validation).
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SCALER_PATH = f'{HERE}/default_scalers.yaml'
@@ -51,6 +57,7 @@ class OneHotScaler(object):
         self.num_classes = torch.max(x)
 
     def transform(self, x):
+        import xarray as xr
         xt = torch.tensor(np.array(x, dtype=np.int64))
         oh = F.one_hot(xt, num_classes=self.num_classes)
         if len(oh.shape) == 4:

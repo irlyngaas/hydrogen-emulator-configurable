@@ -29,12 +29,19 @@ in __getitem__ instead, given a scalers dict in the same
 """
 import numpy as np
 import torch
-import xbatcher as xb
-import xarray as xr
 
 from glob import glob
-from parflow.tools.io import read_pfb
 from torch.utils.data import Dataset
+
+# xbatcher/xarray/parflow.tools.io are lazily imported inside the methods
+# that actually use them (below), not at module level -- this module is
+# imported unconditionally by train.py and transitively by
+# emulator_configurable/__init__.py, so forcing these (real-data-only,
+# occasionally hard-to-install: xbatcher needs a custom fork per the
+# module docstring above, parflow needs pftools) imports at package-
+# import time would break anything that imports this package at all
+# without needing ParFlowSequenceDataset itself -- e.g. pi3nn's synthetic
+# validation, which never constructs one.
 
 
 class ParFlowSequenceDataset(Dataset):
@@ -44,6 +51,7 @@ class ParFlowSequenceDataset(Dataset):
         parameter_list, patch_size, overlap,
         param_nlayer, sequence_length, n_evaptrans=0,
         scalers=None, dtype=torch.float32,
+        valid_fraction=0.0, split='train',
     ):
         super().__init__()
         self.base_dir = f'{data_dir}/{run_name}'
@@ -58,6 +66,25 @@ class ParFlowSequenceDataset(Dataset):
 
         self.pressure_files = sorted(glob(f'{self.base_dir}/transient/pressure*.pfb'))
         self.evaptrans_files = sorted(glob(f'{self.base_dir}/transient/evaptrans*.pfb'))
+
+        # Time-based train/valid split: earliest (1-valid_fraction) of
+        # timesteps = train, latest valid_fraction = valid. Slicing the
+        # file lists HERE, before T_EXTENT/dummy_data/bgen are computed
+        # below from their length, is what prevents a sample from ever
+        # spanning the train/valid boundary -- each split's own T_EXTENT
+        # independently bounds its own samples to stay within its own
+        # slice (T_EXTENT = len(this split's file list) - sequence_length),
+        # with no separate gap needed. valid_fraction=0.0 (default) is a
+        # no-op slice, so every existing call site sees exactly today's
+        # behavior (same pattern as emulator-1ts/dataset.py's addition).
+        if valid_fraction > 0:
+            n = len(self.pressure_files)
+            n_valid = max(sequence_length + 1, int(round(n * valid_fraction)))
+            n_train = n - n_valid
+            sl = slice(0, n_train) if split == 'train' else slice(n_train, n)
+            self.pressure_files = self.pressure_files[sl]
+            self.evaptrans_files = self.evaptrans_files[sl]
+
         if len(self.pressure_files) < sequence_length + 1:
             raise ValueError(
                 f'Need at least sequence_length + 1 ({sequence_length + 1}) '
@@ -65,6 +92,10 @@ class ParFlowSequenceDataset(Dataset):
                 f'found {len(self.pressure_files)}. Pull a wider date range '
                 f'with make_subset_domain_CONUS1.py.'
             )
+
+        from parflow.tools.io import read_pfb
+        import xarray as xr
+        import xbatcher as xb
 
         size_test = read_pfb(self.pressure_files[0])
         self.Z_EXTENT = size_test.shape[0]
@@ -91,6 +122,8 @@ class ParFlowSequenceDataset(Dataset):
         self.generate_namelist()
 
     def generate_namelist(self):
+        from parflow.tools.io import read_pfb
+
         self.PRESSURE_NAMES = [f'press_diff_{i}' for i in range(self.Z_EXTENT)]
         self.EVAPTRANS_NAMES = [f'evaptrans_{i}' for i in range(max(self.n_evaptrans, 1))]
         self.PARAM_NAMES = []
@@ -123,6 +156,7 @@ class ParFlowSequenceDataset(Dataset):
         return x
 
     def _read_param_patch(self, patch_keys):
+        from parflow.tools.io import read_pfb
         parameter_data = []
         for (parameter, n_lay) in zip(self.parameter_list, self.param_nlayer):
             file_name = f'{self.base_dir}/static/{parameter}.pfb'
@@ -137,6 +171,7 @@ class ParFlowSequenceDataset(Dataset):
         return self._scale(static, self.PARAM_NAMES)
 
     def _read_evaptrans_patch(self, file_path, patch_keys):
+        from parflow.tools.io import read_pfb
         evaptrans = read_pfb(file_path, keys=patch_keys)
         if evaptrans.ndim == 2:
             evaptrans = evaptrans[np.newaxis, :, :]
@@ -147,6 +182,7 @@ class ParFlowSequenceDataset(Dataset):
         return self._scale(evaptrans, self.EVAPTRANS_NAMES)
 
     def _read_pressure_patch(self, file_path, patch_keys):
+        from parflow.tools.io import read_pfb
         pressure = read_pfb(file_path, keys=patch_keys)
         return self._scale(pressure, self.PRESSURE_NAMES)
 

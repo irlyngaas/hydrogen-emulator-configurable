@@ -4,14 +4,15 @@ import torch
 import pytorch_lightning as pl
 
 from typing import List, Union, Optional
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from .model_builder import model_setup
 from .pfb_dataset import ParFlowSequenceDataset
 from .scalers import create_scalers_from_yaml
 from pytorch_lightning.callbacks import (
     Callback,
     ModelCheckpoint,
-    LearningRateMonitor
+    LearningRateMonitor,
+    EarlyStopping,
 )
 from .utils import MetricsCallback
 
@@ -39,7 +40,12 @@ def train_model(
     device: Union[torch.device, str]='cuda',
     logging_location: str='./logs',
     scaler_file: Optional[str]=None,
-    config_file: Optional[str]=None
+    config_file: Optional[str]=None,
+    valid_fraction: float=0.0,
+    early_stopping_patience: Optional[int]=None,
+    checkpoint_monitor: str='train_loss',
+    train_dataset: Optional[Dataset]=None,
+    valid_dataset: Optional[Dataset]=None,
 ):
     # Set up callbacks
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -48,9 +54,14 @@ def train_model(
         save_top_k=5,
         every_n_train_steps=logging_frequency,
         every_n_epochs=None,
-        monitor='train_loss'
+        monitor=checkpoint_monitor
     )
     callbacks = [lr_monitor, metrics, checkpoint]
+    # early_stopping_patience=None (default) adds nothing -- every existing
+    # call site, which never passes this, sees exactly today's behavior
+    # (train for the full max_epochs regardless).
+    if early_stopping_patience is not None:
+        callbacks.append(EarlyStopping(monitor=checkpoint_monitor, patience=early_stopping_patience))
 
     # resume_from_checkpoint is now just a local .ckpt path (or None) --
     # the MLflow-database-lookup option is gone along with the MLflow logger
@@ -106,23 +117,57 @@ def train_model(
     # ResNet does, so scaling happens inside the dataset itself here instead
     # of upstream in a data pipe.
     scalers = create_scalers_from_yaml(scaler_file) if scaler_file else None
-    dataset = ParFlowSequenceDataset(
-        data_dir=data_dir,
-        run_name=run_name,
-        parameter_list=parameter_list,
-        patch_size=patch_size,
-        overlap=overlap,
-        param_nlayer=param_nlayer,
-        sequence_length=sequence_length,
-        n_evaptrans=n_evaptrans,
-        scalers=scalers,
-    )
+    # train_dataset/valid_dataset bypass the ParFlowSequenceDataset(data_dir=...)
+    # construction below when supplied -- the seam pi3nn/validate_synthetic.py
+    # needs to inject tiny in-memory tensors instead of reading real .pfb
+    # files, since nothing else here gives that seam.
+    if train_dataset is not None:
+        dataset = train_dataset
+    else:
+        dataset = ParFlowSequenceDataset(
+            data_dir=data_dir,
+            run_name=run_name,
+            parameter_list=parameter_list,
+            patch_size=patch_size,
+            overlap=overlap,
+            param_nlayer=param_nlayer,
+            sequence_length=sequence_length,
+            n_evaptrans=n_evaptrans,
+            scalers=scalers,
+            valid_fraction=valid_fraction,
+            split='train',
+        )
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
     )
+
+    # valid_dataset explicitly supplied: use it regardless of valid_fraction
+    # (the caller is fully in control, e.g. validate_synthetic.py's injected
+    # tensors). Otherwise only build one via ParFlowSequenceDataset's own
+    # split='valid' when valid_fraction > 0 -- split='valid' with
+    # valid_fraction=0.0 would just silently return the full (unsplit) file
+    # list again, not an empty one, so this guard matters.
+    valid_loader = None
+    if valid_dataset is not None:
+        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    elif valid_fraction > 0:
+        valid_ds = ParFlowSequenceDataset(
+            data_dir=data_dir,
+            run_name=run_name,
+            parameter_list=parameter_list,
+            patch_size=patch_size,
+            overlap=overlap,
+            param_nlayer=param_nlayer,
+            sequence_length=sequence_length,
+            n_evaptrans=n_evaptrans,
+            scalers=scalers,
+            valid_fraction=valid_fraction,
+            split='valid',
+        )
+        valid_loader = DataLoader(valid_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Configure the trainer.
     # Lightning's accelerator wants 'cpu'/'gpu'/'auto', not a raw device
@@ -178,6 +223,7 @@ def train_model(
     trainer.fit(
         model=model,
         train_dataloaders=data_loader,
+        val_dataloaders=valid_loader,
         ckpt_path=ckpt_path
     )
 
@@ -187,3 +233,8 @@ def train_model(
     # completed successfully through all max_epochs, so purely cosmetic,
     # but worth fixing so logs flush cleanly and the process exits 0).
     logger.finalize('success')
+
+    # Needed so callers can thread this phase's checkpoint into the next
+    # one (e.g. pi3nn/run_pi3nn_phase.py chaining mean -> up -> down) --
+    # previously unused/absent, since no caller needed it before.
+    return checkpoint.best_model_path or checkpoint.last_model_path
