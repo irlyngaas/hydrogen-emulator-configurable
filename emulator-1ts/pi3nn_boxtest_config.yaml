@@ -2,7 +2,7 @@ name: pi3nn_boxtest
 log_location: /lustre/orion/stf006/proj-shared/irl1/hydrogen-emulator-runs  # CHANGE ME if you want a different output location; must already exist
 batch_size: 4
 num_workers: 1
-device: cpu   # CPU smoke test first -- switch to cuda once this runs cleanly, same escalation as run_pi3nn_validate.slurm
+device: cuda:0   # overridden per-rank by main_pi3nn.py when running distributed; matches conus1_boxtest_config.yaml's default
 dtype: float32
 valid_fraction: 0.1  # time-based split: earliest 90% of timesteps = train, latest 10% = valid (dataset.py)
 data_def:
