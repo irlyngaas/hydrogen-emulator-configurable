@@ -67,6 +67,12 @@ class ParFlowSequenceDataset(Dataset):
         self.pressure_files = sorted(glob(f'{self.base_dir}/transient/pressure*.pfb'))
         self.evaptrans_files = sorted(glob(f'{self.base_dir}/transient/evaptrans*.pfb'))
 
+        if len(self.pressure_files) == 0:
+            raise ValueError(
+                f"No pressure*.pfb files found under '{self.base_dir}/transient/' -- "
+                f'check data_dir/run_name.'
+            )
+
         # Time-based train/valid split: earliest (1-valid_fraction) of
         # timesteps = train, latest valid_fraction = valid. Slicing the
         # file lists HERE, before T_EXTENT/dummy_data/bgen are computed
@@ -79,7 +85,15 @@ class ParFlowSequenceDataset(Dataset):
         # behavior (same pattern as emulator-1ts/dataset.py's addition).
         if valid_fraction > 0:
             n = len(self.pressure_files)
-            n_valid = max(sequence_length + 1, int(round(n * valid_fraction)))
+            min_each = sequence_length + 1
+            if n < 2 * min_each:
+                raise ValueError(
+                    f'Dataset has only {n} pressure timesteps, which is not enough to '
+                    f'support a train/valid split with sequence_length={sequence_length} '
+                    f'(need at least {2 * min_each}: {min_each} for each split). '
+                    f'Use valid_fraction=0.0 for this dataset, or pull a wider date range.'
+                )
+            n_valid = max(min_each, int(round(n * valid_fraction)))
             n_train = n - n_valid
             sl = slice(0, n_train) if split == 'train' else slice(n_train, n)
             self.pressure_files = self.pressure_files[sl]
@@ -89,8 +103,8 @@ class ParFlowSequenceDataset(Dataset):
             raise ValueError(
                 f'Need at least sequence_length + 1 ({sequence_length + 1}) '
                 f'consecutive pressure timesteps to form one sequence sample, '
-                f'found {len(self.pressure_files)}. Pull a wider date range '
-                f'with make_subset_domain_CONUS1.py.'
+                f'found {len(self.pressure_files)} for split={split!r}. Pull a wider '
+                f'date range with make_subset_domain_CONUS1.py.'
             )
 
         from parflow.tools.io import read_pfb
