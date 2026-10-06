@@ -1,5 +1,6 @@
 {
-    "run_name": "CONUS1_boxtest_pi3nn",
+    "run_name": "CONUS1_boxtest_conus1_baseline_mod_2002-10-01",
+    "experiment_name": "CONUS1_boxtest_pi3nn",
     "data_dir": "/lustre/orion/stf006/proj-shared/irl1/hydrogen-data",
     "parameter_list": ["slope_x", "slope_y", "pme", "ss_pressure_head", "pf_indicator", "porosity", "permeability", "van_genuchten_alpha", "van_genuchten_n"],
     "param_nlayer": [0, 0, 0, 0, 0, 0, 0, 0, 0],

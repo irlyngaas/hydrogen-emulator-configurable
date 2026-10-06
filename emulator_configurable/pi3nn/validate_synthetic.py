@@ -240,7 +240,7 @@ def check_full_sequence():
                 config={
                     'mean_model_config': mean_config,
                     'updown_model_config': {up_down_mode: updown_config},
-                    'quantile': 0.9, 'logging_location': logdir, 'run_name': f'synthetic_{up_down_mode}',
+                    'quantile': 0.9, 'logging_location': logdir, 'experiment_name': f'synthetic_{up_down_mode}',
                     'batch_size': common['batch_size'], 'num_workers': common['num_workers'],
                 },
                 mean_ckpt_path=mean_ckpt, up_ckpt_path=role_ckpts['up'], down_ckpt_path=role_ckpts['down'],

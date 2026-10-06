@@ -126,7 +126,8 @@ def calibrate(config, mean_ckpt_path, up_ckpt_path, down_ckpt_path, up_down_mode
         c_down = opt.optimize_down(verbose=0)
         results[f'channel_{c}'] = {'c_up': c_up, 'c_down': c_down, **_caps(y_c, m_c, u_c, d_c, c_up, c_down)}
 
-    out_path = f"{config['logging_location']}/{config['run_name']}_{up_down_mode}_calibration.json"
+    # experiment_name, not run_name -- see train.py's data_run_name docstring
+    out_path = f"{config['logging_location']}/{config['experiment_name']}_{up_down_mode}_calibration.json"
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=2)
     print(f'Saved calibration results to {out_path}')

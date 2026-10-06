@@ -46,6 +46,7 @@ def train_model(
     checkpoint_monitor: str='train_loss',
     train_dataset: Optional[Dataset]=None,
     valid_dataset: Optional[Dataset]=None,
+    data_run_name: Optional[str]=None,
 ):
     # Set up callbacks
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -117,6 +118,22 @@ def train_model(
     # ResNet does, so scaling happens inside the dataset itself here instead
     # of upstream in a data pipe.
     scalers = create_scalers_from_yaml(scaler_file) if scaler_file else None
+    # data_run_name: the .pfb data directory's name, which must stay the
+    # SAME real value regardless of what this particular training run is
+    # called -- defaults to run_name (today's exact behavior, correct for
+    # every existing call site, which only ever runs one model per data
+    # run so the two coincide). PI3NN's run_pi3nn_phase.py needs them to
+    # differ: it calls train_model() three times (mean/up/down) against
+    # the SAME real CONUS1 data directory, but wants each phase's
+    # Lightning logging/checkpoint naming to differ (run_name=
+    # "<name>_mean", "<name>_up", ...) -- passing that per-phase name
+    # straight into ParFlowSequenceDataset's run_name (what this
+    # parameter used to be conflated with) pointed every phase at a
+    # nonexistent "<data_dir>/<name>_mean/" directory instead of the
+    # real one. Confirmed by an actual failed run: "found 0 ... pressure
+    # timesteps" from inside this exact dataset construction.
+    if data_run_name is None:
+        data_run_name = run_name
     # train_dataset/valid_dataset bypass the ParFlowSequenceDataset(data_dir=...)
     # construction below when supplied -- the seam pi3nn/validate_synthetic.py
     # needs to inject tiny in-memory tensors instead of reading real .pfb
@@ -126,7 +143,7 @@ def train_model(
     else:
         dataset = ParFlowSequenceDataset(
             data_dir=data_dir,
-            run_name=run_name,
+            run_name=data_run_name,
             parameter_list=parameter_list,
             patch_size=patch_size,
             overlap=overlap,
@@ -156,7 +173,7 @@ def train_model(
     elif valid_fraction > 0:
         valid_ds = ParFlowSequenceDataset(
             data_dir=data_dir,
-            run_name=run_name,
+            run_name=data_run_name,
             parameter_list=parameter_list,
             patch_size=patch_size,
             overlap=overlap,

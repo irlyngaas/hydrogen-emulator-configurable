@@ -30,7 +30,11 @@ from .calibration import calibrate
 
 
 def _ckpt_file(config, role):
-    return f"{config['logging_location']}/{config['run_name']}_{role}_ckpt.txt"
+    # experiment_name, not run_name: run_name is the real CONUS1 .pfb data
+    # directory name (must stay constant across every phase) --
+    # experiment_name is just this set of PI3NN runs' human-readable label,
+    # used only for naming logs/checkpoints/output files.
+    return f"{config['logging_location']}/{config['experiment_name']}_{role}_ckpt.txt"
 
 
 def _write_ckpt(config, role, ckpt_path):
@@ -49,7 +53,8 @@ def _checkpoint_monitor(config):
 
 def run_mean(config):
     ckpt = train_model(
-        run_name=f"{config['run_name']}_mean",
+        run_name=f"{config['experiment_name']}_mean",
+        data_run_name=config['run_name'],  # the real .pfb data directory name -- see train.py's data_run_name docstring
         model_type='ForcedSTRNN',
         model_config=config['mean_model_config'],
         data_dir=config['data_dir'], parameter_list=config['parameter_list'],
@@ -90,7 +95,8 @@ def run_updown(config, role, up_down_mode, mean_ckpt_path=None):
     _check_hidden_state_channel(config, up_down_mode)
     mean_ckpt = mean_ckpt_path or _read_ckpt(config, 'mean')
     ckpt = train_model(
-        run_name=f"{config['run_name']}_{up_down_mode}_{role}",
+        run_name=f"{config['experiment_name']}_{up_down_mode}_{role}",
+        data_run_name=config['run_name'],  # the real .pfb data directory name -- see train.py's data_run_name docstring
         model_type='PI3NNUpDownModule',
         model_config={
             'up_down_mode': up_down_mode, 'role': role,
