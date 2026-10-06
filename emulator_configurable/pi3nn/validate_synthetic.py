@@ -22,6 +22,8 @@ Usage: python -m emulator_configurable.pi3nn.validate_synthetic
 """
 import argparse
 import os
+import subprocess
+import sys
 import tempfile
 
 import torch
@@ -252,6 +254,32 @@ def check_full_sequence():
     print('PASS: full mean -> up -> down -> calibrate sequence completes for all three up_down_mode variants.')
 
 
+def check_run_pi3nn_phase_registers_updown():
+    """Regression test for an actual bug hit on Frontier: model_builder's
+    @register_emulator('PI3NNUpDownModule') decorator only runs when
+    lightning_modules.py is imported, and run_pi3nn_phase.py's own import
+    chain didn't do that -- model_setup() raised
+    KeyError('PI3NNUpDownModule') the moment the up/down phase actually
+    tried to build one. Every other check in this file is insensitive to
+    this, because this file ALSO (independently) imports
+    lightning_modules.PI3NNUpDownModule at module level for
+    check_freeze_correctness -- by the time any check function here runs,
+    the registration already happened for an unrelated reason, masking
+    exactly this gap. Needs a genuinely fresh subprocess that imports
+    ONLY run_pi3nn_phase to actually test it."""
+    result = subprocess.run(
+        [sys.executable, '-c',
+         "import emulator_configurable.pi3nn.run_pi3nn_phase as m\n"
+         "from emulator_configurable.model_builder import ModelBuilder\n"
+         "assert 'PI3NNUpDownModule' in ModelBuilder.registry['emulator']"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        f'importing run_pi3nn_phase alone did not register PI3NNUpDownModule:\n{result.stderr}'
+    )
+    print('PASS: importing run_pi3nn_phase alone registers PI3NNUpDownModule (no hidden import-order dependency).')
+
+
 def run_full():
     check_positivity_all_modes()
     check_return_hidden_preserves_behavior()
@@ -259,6 +287,7 @@ def run_full():
     check_freeze_correctness()
     check_recurrent_clone_positivity()
     check_full_sequence()
+    check_run_pi3nn_phase_registers_updown()
     print('PASS: all synthetic validation checks passed.')
 
 

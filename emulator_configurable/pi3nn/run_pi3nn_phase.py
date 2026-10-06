@@ -25,6 +25,16 @@ Usage:
 import argparse
 import json
 
+# Not referenced directly below -- importing this is what runs
+# lightning_modules.py's @model_builder.register_emulator('PI3NNUpDownModule')
+# decorator, which is how model_setup() (called inside train_model() for
+# the up/down phases) can find 'PI3NNUpDownModule' by string name at all.
+# Without this import, nothing in this file's own import chain ever
+# imports lightning_modules.py, so the registry entry never gets created
+# and model_builder.build_emulator() raises KeyError('PI3NNUpDownModule')
+# -- confirmed by an actual failed run.
+from . import lightning_modules  # noqa: F401
+
 from ..train import train_model
 from .calibration import calibrate
 
