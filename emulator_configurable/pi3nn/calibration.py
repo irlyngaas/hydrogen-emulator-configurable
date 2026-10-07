@@ -324,7 +324,10 @@ def _per_cell_picp_stats(inside, cell_index, n_cells):
     well-calibrated than the scalar baseline's one-size-fits-all number
     (a low picp_spatial_std means every cell is close to the target
     quantile; the scalar baseline can hit the global target while
-    hiding wide per-cell variance)."""
+    hiding wide per-cell variance). Also returns 'picp_field': the raw
+    per-cell PICP array itself (shape (n_cells,), NaN where no points
+    landed in that cell) -- the caller reshapes it to field_shape for
+    saving/plotting (see plot_spatial_field.py)."""
     import numpy as np
     sums = np.bincount(cell_index, weights=inside.astype(float), minlength=n_cells)
     counts = np.bincount(cell_index, minlength=n_cells)
@@ -336,6 +339,7 @@ def _per_cell_picp_stats(inside, cell_index, n_cells):
         'picp_spatial_std': float(np.nanstd(per_cell_picp)),
         'picp_spatial_min': float(np.nanmin(per_cell_picp)),
         'picp_spatial_max': float(np.nanmax(per_cell_picp)),
+        'picp_field': per_cell_picp,
     }
 
 
@@ -455,12 +459,14 @@ def calibrate_spatial_field(config, mean_ckpt_path, up_ckpt_path, down_ckpt_path
         c_down_per_point = c_down_field.reshape(-1)[cell_index]
         picp, mpiw, rmse, r2, inside = _caps_field(y_c, m_c, u_c, d_c, c_up_per_point, c_down_per_point)
         spatial_stats = _per_cell_picp_stats(inside, cell_index, n_cells)
+        picp_field = spatial_stats.pop('picp_field').reshape(field_h, field_w)
 
         results[f'channel_{c}'] = {
             'alpha_up': alpha_up, 'alpha_down': alpha_down,
             'c_up_field': c_up_field.tolist(), 'c_down_field': c_down_field.tolist(),
             'picp': picp, 'mpiw': mpiw, 'rmse': rmse, 'r2': r2,
             **spatial_stats,
+            'picp_field': picp_field.tolist(),
         }
 
     out_path = (
@@ -471,6 +477,6 @@ def calibrate_spatial_field(config, mean_ckpt_path, up_ckpt_path, down_ckpt_path
         json.dump(results, f, indent=2)
     print(f'Saved spatial-field calibration results to {out_path}')
     for k, v in results.items():
-        summary = {kk: vv for kk, vv in v.items() if kk not in ('c_up_field', 'c_down_field')}
+        summary = {kk: vv for kk, vv in v.items() if kk not in ('c_up_field', 'c_down_field', 'picp_field')}
         print(k, summary)
     return results

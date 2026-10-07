@@ -535,10 +535,18 @@ class PI3NNConvTrainer:
                 picp_spatial_min[c] = float(vals.min())
                 picp_spatial_max[c] = float(vals.max())
 
+        # The map itself, not just its summary stats -- NaN where no
+        # point landed in that cell, reshaped for saving/plotting (see
+        # plot_spatial_field.py).
+        picp_field = per_cell_picp.copy()
+        picp_field[~valid_cell] = np.nan
+        picp_field = torch.from_numpy(picp_field.reshape(out_channels, field_h, field_w))
+
         return {
             'picp': picp, 'mpiw': mpiw, 'rmse': rmse, 'r2': r2,
             'picp_spatial_mean': picp_spatial_mean, 'picp_spatial_std': picp_spatial_std,
             'picp_spatial_min': picp_spatial_min, 'picp_spatial_max': picp_spatial_max,
+            'picp_field': picp_field,
         }
 
     def evaluate_spatial_field(self, verbose=0):

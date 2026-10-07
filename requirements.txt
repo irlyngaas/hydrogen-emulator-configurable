@@ -4,6 +4,7 @@ torch
 pytorch_lightning
 xarray
 scipy
+matplotlib
 dask[diagnostics]
 bottleneck
 mlflow

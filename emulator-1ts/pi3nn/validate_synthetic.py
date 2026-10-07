@@ -44,6 +44,7 @@ validated flat port's `python3 -m pi3nn_torch.run_boston_comparison`):
 """
 import argparse
 import os
+import tempfile
 
 import numpy as np
 import torch
@@ -354,15 +355,17 @@ def check_spatial_field_global_coverage_restored():
     print(f'PASS: stage-3 global rescale restores target coverage after smoothing (picp={picp:.4f}, target={quantile}).')
 
 
-def _assert_spatial_picp_stats_sane(results, out_channels):
+def _assert_spatial_picp_stats_sane(results, out_channels, field_shape):
     """Regression check for a real gap caught by the user: evaluate_
     spatial_field's results must include per-cell PICP spread
-    (picp_spatial_mean/std/min/max), not just the pooled global picp --
-    _per_cell_picp_stats-equivalent reporting was ported into
-    spatial_calibration.py but never actually wired into trainer.py's
-    evaluate path until this was fixed. min <= mean <= max and std >= 0
-    are real algebraic requirements of how these are computed (a quantile/
-    bounds check, not just presence), not just "the keys exist"."""
+    (picp_spatial_mean/std/min/max) AND the per-cell map itself
+    (picp_field), not just the pooled global picp -- _per_cell_picp_
+    stats-equivalent reporting was ported into spatial_calibration.py but
+    never actually wired into trainer.py's evaluate path until this was
+    fixed. min <= mean <= max and std >= 0 are real algebraic
+    requirements of how these are computed (a bounds check, not just
+    presence), and picp_field's own (non-NaN) min/max must be consistent
+    with the reported scalar min/max."""
     keys = ('picp_spatial_mean', 'picp_spatial_std', 'picp_spatial_min', 'picp_spatial_max')
     for split in ('train', 'valid'):
         for k in keys:
@@ -372,6 +375,15 @@ def _assert_spatial_picp_stats_sane(results, out_channels):
         mean, std, lo, hi = (results[split][k] for k in keys)
         assert (std >= 0).all(), f'{split}: picp_spatial_std has a negative entry'
         assert (lo <= mean).all() and (mean <= hi).all(), f'{split}: picp_spatial_min/mean/max out of order'
+
+        assert 'picp_field' in results[split], f"evaluate_spatial_field()'s {split!r} results missing 'picp_field'"
+        field = results[split]['picp_field']
+        assert field.shape == (out_channels, *field_shape), f'{split}/picp_field shape {field.shape} != ({out_channels}, {field_shape})'
+        for c in range(out_channels):
+            vals = field[c][~torch.isnan(field[c])]
+            assert vals.numel() > 0, f'{split}/picp_field channel {c} is entirely NaN'
+            assert abs(vals.min().item() - lo[c].item()) < 1e-6, f'{split}/picp_field channel {c} min disagrees with picp_spatial_min'
+            assert abs(vals.max().item() - hi[c].item()) < 1e-6, f'{split}/picp_field channel {c} max disagrees with picp_spatial_max'
 
 
 def check_spatial_field_patch_relative_integration():
@@ -411,8 +423,20 @@ def check_spatial_field_patch_relative_integration():
 
     assert trainer.c_up_field.shape == (out_channels, patch, patch), f'c_up_field shape {trainer.c_up_field.shape} != ({out_channels},{patch},{patch})'
     assert 'train' in results and 'valid' in results
-    _assert_spatial_picp_stats_sane(results, out_channels)
+    _assert_spatial_picp_stats_sane(results, out_channels, (patch, patch))
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'patch_relative' mode.")
+
+    from .plot_spatial_field import load_and_plot_pth
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({
+            'c_up_field': trainer.c_up_field, 'c_down_field': trainer.c_down_field,
+            'spatial_field_coords': 'patch_relative', 'results': results, 'model_def': model_def,
+        }, pth_path)
+        png_path = os.path.join(d, 'check.png')
+        load_and_plot_pth(pth_path, split='train', out_path=png_path, quantile=0.9)
+        assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_spatial_field produced no (or an empty) PNG'
+    print('PASS: plot_spatial_field.load_and_plot_pth renders a real {name}_pi3nn.pth result without error.')
 
 
 def check_spatial_field_absolute_mode():
@@ -462,7 +486,7 @@ def check_spatial_field_absolute_mode():
 
     assert trainer.c_up_field.shape == (out_channels, y_extent, x_extent), f'c_up_field shape {trainer.c_up_field.shape} != ({out_channels},{y_extent},{x_extent})'
     assert 'train' in results and 'valid' in results
-    _assert_spatial_picp_stats_sane(results, out_channels)
+    _assert_spatial_picp_stats_sane(results, out_channels, (y_extent, x_extent))
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'absolute' coordinate mode, full-domain field.")
 
 

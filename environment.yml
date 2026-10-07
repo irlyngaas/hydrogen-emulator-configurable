@@ -13,6 +13,7 @@ dependencies:
   - xarray
   - xskillscore
   - scipy
+  - matplotlib
   - tqdm
   - dill
   - numcodecs

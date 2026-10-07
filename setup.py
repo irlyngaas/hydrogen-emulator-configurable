@@ -11,6 +11,7 @@ setup(
         'pytorch-lightning',
         'numpy',
         'scipy',
+        'matplotlib',
         'xarray',
         'pandas',
         'dask[diagnostics]',

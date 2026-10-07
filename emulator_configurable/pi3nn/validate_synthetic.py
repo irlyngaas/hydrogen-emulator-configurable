@@ -501,7 +501,16 @@ def check_spatial_field_patch_relative_integration():
         for ch, res in results.items():
             field = np.array(res['c_up_field'])
             assert field.shape == (patch, patch), f'{ch}: c_up_field shape {field.shape} != ({patch},{patch})'
-    print("PASS: calibrate_spatial_field runs end-to-end in 'patch_relative' mode (default) through the real pipeline.")
+            assert 'picp_field' in res, f'{ch}: calibrate_spatial_field results missing picp_field'
+            assert np.array(res['picp_field']).shape == (patch, patch)
+        print("PASS: calibrate_spatial_field runs end-to-end in 'patch_relative' mode (default) through the real pipeline.")
+
+        from .plot_spatial_field import load_and_plot_json
+        json_path = f'{logdir}/synthetic_spatial_{up_down_mode}_patch_relative_spatial_calibration.json'
+        png_path = f'{logdir}/check.png'
+        load_and_plot_json(json_path, out_path=png_path, quantile=0.9)
+        assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_spatial_field produced no (or an empty) PNG'
+    print('PASS: plot_spatial_field.load_and_plot_json renders a real calibrate_spatial_field() JSON result without error.')
 
 
 def check_spatial_field_absolute_mode():
