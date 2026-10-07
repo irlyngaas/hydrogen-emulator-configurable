@@ -56,13 +56,26 @@ def plot_calibration_fields(c_up_field, c_down_field, picp_field, out_path, quan
         # Diverging colormap centered on the target quantile (or the
         # field's own mean if no target given) -- makes under/over-
         # coverage visually obvious instead of varying shades of one hue.
+        # TwoSlopeNorm (not a symmetric vmin/vmax around the center): PICP
+        # is physically bounded in [0, 1] and its distribution around the
+        # target is usually skewed (e.g. mostly undercovering, rarely
+        # overcovering past the target) -- a symmetric range around the
+        # center would pad the color scale out past 1.0 on the side with
+        # less deviation, wasting most of the dynamic range on values that
+        # don't exist. TwoSlopeNorm instead maps the center to white and
+        # each side's ACTUAL min/max to full color, independently.
+        from matplotlib.colors import TwoSlopeNorm
         chan_field = picp_field[c]
-        max_dev = max(
-            picp_center - float(np.nanmin(chan_field)),
-            float(np.nanmax(chan_field)) - picp_center,
-            1e-6,
-        )
-        im_picp = ax_picp.imshow(chan_field, cmap='RdBu_r', vmin=picp_center - max_dev, vmax=picp_center + max_dev)
+        vmin = float(np.nanmin(chan_field))
+        vmax = float(np.nanmax(chan_field))
+        if vmin == vmax:
+            vmin, vmax = vmin - 1e-6, vmax + 1e-6
+        # TwoSlopeNorm requires vmin < vcenter < vmax; if every cell is on
+        # one side of the target (e.g. entirely undercovering), nudge the
+        # center to just inside the data range rather than crash.
+        center = min(max(picp_center, vmin + 1e-9), vmax - 1e-9)
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=center, vmax=vmax)
+        im_picp = ax_picp.imshow(chan_field, cmap='RdBu_r', norm=norm)
         title = f'{channel_names[c]}: picp_field'
         if quantile is not None:
             title += f' (target {quantile})'
