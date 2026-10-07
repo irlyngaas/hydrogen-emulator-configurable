@@ -442,6 +442,18 @@ class PI3NNConvTrainer:
 
         c_up_field = self.c_up_field.numpy()    # (out_channels, field_h, field_w)
         c_down_field = self.c_down_field.numpy()
+        field_h, field_w = self.c_up_field.shape[1], self.c_up_field.shape[2]
+        n_cells = field_h * field_w
+        # Per-cell accumulation (same spirit as _per_cell_picp_stats in
+        # spatial_calibration.py, but streamed across this loader's batches
+        # via scatter_add_ instead of needing every point materialized in
+        # memory at once) -- the pooled picp/mpiw/rmse/r2 below hide
+        # whether the field is actually locally well-calibrated everywhere
+        # or just correct on (pooled) average; this is the diagnostic that
+        # tells the difference, same one calibrate_spatial_field() already
+        # reports in emulator_configurable.
+        per_cell_inside_sum = torch.zeros(out_channels, n_cells, device=self.device)
+        per_cell_count = torch.zeros(out_channels, n_cells, device=self.device)
 
         with torch.no_grad():
             for batch in loader:
@@ -490,8 +502,15 @@ class PI3NNConvTrainer:
                     y_sq_sum[c] += (y[:, c] ** 2).sum()
                     count[c] += inside[:, c].numel()
 
+                cell_idx_batch = torch.from_numpy((global_h * field_w + global_w).astype(np.int64)).to(self.device)
+                cell_idx_exp = cell_idx_batch.unsqueeze(1).expand(-1, out_channels, -1, -1)
+                chan_idx_exp = torch.arange(out_channels, device=self.device).view(1, -1, 1, 1).expand(batch_n, -1, patch_h, patch_w)
+                combined_idx = (chan_idx_exp * n_cells + cell_idx_exp).reshape(-1)
+                per_cell_inside_sum.view(-1).scatter_add_(0, combined_idx, inside.reshape(-1).to(per_cell_inside_sum.dtype))
+                per_cell_count.view(-1).scatter_add_(0, combined_idx, torch.ones_like(inside.reshape(-1)).to(per_cell_count.dtype))
+
         if reduce_across_ranks and dist.is_initialized():
-            for t in (sq_err_sum, inside_sum, width_sum, y_sum, y_sq_sum, count):
+            for t in (sq_err_sum, inside_sum, width_sum, y_sum, y_sq_sum, count, per_cell_inside_sum, per_cell_count):
                 dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
         n = count.clamp_min(1)
@@ -501,7 +520,26 @@ class PI3NNConvTrainer:
         ss_res = sq_err_sum
         ss_tot = y_sq_sum - (y_sum ** 2) / n
         r2 = (1 - ss_res / ss_tot.clamp_min(1e-12)).cpu()
-        return {'picp': picp, 'mpiw': mpiw, 'rmse': rmse, 'r2': r2}
+
+        per_cell_picp = (per_cell_inside_sum / per_cell_count.clamp_min(1)).cpu().numpy()
+        valid_cell = (per_cell_count > 0).cpu().numpy()
+        picp_spatial_mean = torch.full((out_channels,), float('nan'))
+        picp_spatial_std = torch.full((out_channels,), float('nan'))
+        picp_spatial_min = torch.full((out_channels,), float('nan'))
+        picp_spatial_max = torch.full((out_channels,), float('nan'))
+        for c in range(out_channels):
+            vals = per_cell_picp[c][valid_cell[c]]
+            if vals.size:
+                picp_spatial_mean[c] = float(vals.mean())
+                picp_spatial_std[c] = float(vals.std())
+                picp_spatial_min[c] = float(vals.min())
+                picp_spatial_max[c] = float(vals.max())
+
+        return {
+            'picp': picp, 'mpiw': mpiw, 'rmse': rmse, 'r2': r2,
+            'picp_spatial_mean': picp_spatial_mean, 'picp_spatial_std': picp_spatial_std,
+            'picp_spatial_min': picp_spatial_min, 'picp_spatial_max': picp_spatial_max,
+        }
 
     def evaluate_spatial_field(self, verbose=0):
         """Spatial-field analog of evaluate(): per-channel PICP/MPIW/

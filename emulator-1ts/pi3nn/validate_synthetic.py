@@ -354,6 +354,26 @@ def check_spatial_field_global_coverage_restored():
     print(f'PASS: stage-3 global rescale restores target coverage after smoothing (picp={picp:.4f}, target={quantile}).')
 
 
+def _assert_spatial_picp_stats_sane(results, out_channels):
+    """Regression check for a real gap caught by the user: evaluate_
+    spatial_field's results must include per-cell PICP spread
+    (picp_spatial_mean/std/min/max), not just the pooled global picp --
+    _per_cell_picp_stats-equivalent reporting was ported into
+    spatial_calibration.py but never actually wired into trainer.py's
+    evaluate path until this was fixed. min <= mean <= max and std >= 0
+    are real algebraic requirements of how these are computed (a quantile/
+    bounds check, not just presence), not just "the keys exist"."""
+    keys = ('picp_spatial_mean', 'picp_spatial_std', 'picp_spatial_min', 'picp_spatial_max')
+    for split in ('train', 'valid'):
+        for k in keys:
+            assert k in results[split], f"evaluate_spatial_field()'s {split!r} results missing {k!r}"
+            v = results[split][k]
+            assert v.shape == (out_channels,), f'{split}/{k} shape {v.shape} != ({out_channels},)'
+        mean, std, lo, hi = (results[split][k] for k in keys)
+        assert (std >= 0).all(), f'{split}: picp_spatial_std has a negative entry'
+        assert (lo <= mean).all() and (mean <= hi).all(), f'{split}: picp_spatial_min/mean/max out of order'
+
+
 def check_spatial_field_patch_relative_integration():
     """End-to-end integration through the real PI3NNConvTrainer pipeline
     (not hand-built arrays like the checks above): train -> spatial-field
@@ -391,6 +411,7 @@ def check_spatial_field_patch_relative_integration():
 
     assert trainer.c_up_field.shape == (out_channels, patch, patch), f'c_up_field shape {trainer.c_up_field.shape} != ({out_channels},{patch},{patch})'
     assert 'train' in results and 'valid' in results
+    _assert_spatial_picp_stats_sane(results, out_channels)
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'patch_relative' mode.")
 
 
@@ -441,6 +462,7 @@ def check_spatial_field_absolute_mode():
 
     assert trainer.c_up_field.shape == (out_channels, y_extent, x_extent), f'c_up_field shape {trainer.c_up_field.shape} != ({out_channels},{y_extent},{x_extent})'
     assert 'train' in results and 'valid' in results
+    _assert_spatial_picp_stats_sane(results, out_channels)
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'absolute' coordinate mode, full-domain field.")
 
 
