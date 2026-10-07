@@ -16,6 +16,7 @@ port's equal-shard-size approach.
 """
 import math
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -23,6 +24,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from utils import get_optimizer
 from .boundary_optimizer import BoundaryOptimizer
 from .losses import masked_sq_sum, reduced_masked_mse_loss, residual_targets
+from .spatial_calibration import fit_spatial_field
 
 
 def is_main_process():
@@ -34,6 +36,7 @@ class PI3NNConvTrainer:
         self, configs, net_mean, net_up, net_down,
         train_dl, valid_dl, train_dl_full,
         train_sampler=None, device='cpu',
+        train_dl_full_coords=None, valid_dl_coords=None,
     ):
         """
         train_dl/valid_dl: used for the per-epoch SGD training/validation
@@ -49,6 +52,16 @@ class PI3NNConvTrainer:
         rank-0-only full pass over this loader instead. For a
         single-process run (validate_synthetic.py), just pass the same
         DataLoader as train_dl here.
+
+        train_dl_full_coords/valid_dl_coords: optional, only needed for
+        boundary_optimization_spatial_field()/evaluate_spatial_field()'s
+        coords_mode='absolute' -- DataLoaders built from
+        ParFlowDataset(..., return_coords=True) (split='train'/'valid'
+        respectively), so each batch also carries this sample's absolute
+        (y_min, x_min) position in the domain grid. Not needed for
+        coords_mode='patch_relative' (the default), which reuses
+        train_dl_full/valid_dl exactly like the scalar methods do, since
+        position-within-patch needs no coordinate plumbing at all.
         """
         self.configs = configs
         self.device = device
@@ -58,9 +71,14 @@ class PI3NNConvTrainer:
         self.train_dl = train_dl
         self.valid_dl = valid_dl
         self.train_dl_full = train_dl_full
+        self.train_dl_full_coords = train_dl_full_coords
+        self.valid_dl_coords = valid_dl_coords
         self.train_sampler = train_sampler
         self.c_up = None
         self.c_down = None
+        self.c_up_field = None
+        self.c_down_field = None
+        self.spatial_field_coords_mode = None
 
         # DDP only ever wraps the forward pass used for a phase's gradient
         # step (see _train_phase) -- boundary_optimization() and
@@ -257,6 +275,98 @@ class PI3NNConvTrainer:
         self.c_up = c_up
         self.c_down = c_down
 
+    def boundary_optimization_spatial_field(self, coords_mode='patch_relative', rank=3, verbose=0):
+        """Spatial-field analog of boundary_optimization(): c_up/c_down
+        become a smoothed per-cell field instead of one scalar per
+        channel. See pi3nn/spatial_calibration.py's module docstring for
+        the three-stage algorithm (per-cell BoundaryOptimizer fit -> DCT
+        low-rank smoothing -> global rescale).
+
+        coords_mode: 'patch_relative' (default) -- field indexed by
+        position within each (patch_size, patch_size) sample, reuses
+        self.train_dl_full exactly like boundary_optimization() does, no
+        dataset changes needed. 'absolute' -- field indexed by this
+        sample's real position in the fixed CONUS1 domain grid (same
+        grid/size every call, since ParFlowDataset's xbatcher
+        BatchGenerator tiles the same fixed extent every time) -- needs
+        self.train_dl_full_coords (see __init__'s docstring)."""
+        self.net_mean.eval()
+        self.net_up.eval()
+        self.net_down.eval()
+        out_channels = self.net_mean.output_channels
+
+        if coords_mode == 'absolute' and self.train_dl_full_coords is None:
+            raise ValueError(
+                "coords_mode='absolute' needs train_dl_full_coords (a DataLoader built from "
+                "ParFlowDataset(..., return_coords=True)) passed to PI3NNConvTrainer's constructor."
+            )
+        loader = self.train_dl_full_coords if coords_mode == 'absolute' else self.train_dl_full
+        ds = loader.dataset
+        field_h, field_w = (ds.Y_EXTENT, ds.X_EXTENT) if coords_mode == 'absolute' else (ds.patch_size, ds.patch_size)
+        n_cells = field_h * field_w
+
+        c_up_field = torch.zeros(out_channels, field_h, field_w, dtype=torch.float64)
+        c_down_field = torch.zeros(out_channels, field_h, field_w, dtype=torch.float64)
+
+        if is_main_process():
+            means, ups, downs, ys, coords = [], [], [], [], []
+            with torch.no_grad():
+                for batch in loader:
+                    if coords_mode == 'absolute':
+                        state, evaptrans, params, y, coord = batch
+                        coords.append(coord)
+                    else:
+                        state, evaptrans, params, y = batch
+                    state, evaptrans, params, y = self._prepare_batch((state, evaptrans, params, y))
+                    means.append(self.net_mean(state, evaptrans, params).cpu())
+                    ups.append(self.net_up(state, evaptrans, params).cpu())
+                    downs.append(self.net_down(state, evaptrans, params).cpu())
+                    ys.append(y.cpu())
+            mean_t = torch.cat(means)
+            up_t = torch.cat(ups)
+            down_t = torch.cat(downs)
+            y_t = torch.cat(ys)
+            n_sample, _, patch_h, patch_w = mean_t.shape
+
+            local_h = np.arange(patch_h)[:, None]
+            local_w = np.arange(patch_w)[None, :]
+            if coords_mode == 'absolute':
+                coord_t = torch.cat(coords).numpy()
+                global_h = coord_t[:, 0][:, None, None] + local_h[None, :, :]
+                global_w = coord_t[:, 1][:, None, None] + local_w[None, :, :]
+                global_h = np.broadcast_to(global_h, (n_sample, patch_h, patch_w))
+                global_w = np.broadcast_to(global_w, (n_sample, patch_h, patch_w))
+                cell_hw = (global_h * field_w + global_w).astype(np.int64)
+            else:
+                cell_hw = np.broadcast_to((local_h * patch_w + local_w)[None, :, :], (n_sample, patch_h, patch_w)).astype(np.int64)
+            cell_index = cell_hw.reshape(-1)
+
+            quantile = self.configs['quantile']
+            for c in range(out_channels):
+                y_c = y_t[:, c].numpy().reshape(-1)
+                m_c = mean_t[:, c].numpy().reshape(-1)
+                u_c = up_t[:, c].numpy().reshape(-1)
+                d_c = down_t[:, c].numpy().reshape(-1)
+                c_up_f, c_down_f, alpha_up, alpha_down = fit_spatial_field(
+                    y_c, m_c, u_c, d_c, cell_index, n_cells, (field_h, field_w), quantile, rank,
+                )
+                c_up_field[c] = torch.from_numpy(c_up_f)
+                c_down_field[c] = torch.from_numpy(c_down_f)
+                if verbose > 0:
+                    print(f'[channel {c}] alpha_up: {alpha_up:.4f}, alpha_down: {alpha_down:.4f}')
+
+        if dist.is_initialized():
+            c_up_field = c_up_field.to(self.device)
+            c_down_field = c_down_field.to(self.device)
+            dist.broadcast(c_up_field, src=0)
+            dist.broadcast(c_down_field, src=0)
+            c_up_field = c_up_field.cpu()
+            c_down_field = c_down_field.cpu()
+
+        self.c_up_field = c_up_field
+        self.c_down_field = c_down_field
+        self.spatial_field_coords_mode = coords_mode
+
     def _caps_over_loader(self, loader, reduce_across_ranks):
         out_channels = self.net_mean.output_channels
         sq_err_sum = torch.zeros(out_channels, device=self.device)
@@ -314,6 +424,111 @@ class PI3NNConvTrainer:
         if is_main_process():
             results['train'] = self._caps_over_loader(self.train_dl_full, reduce_across_ranks=False)
         results['valid'] = self._caps_over_loader(self.valid_dl, reduce_across_ranks=True)
+
+        if verbose > 0 and is_main_process():
+            for split, metrics in results.items():
+                for k, v in metrics.items():
+                    print(f'{split}_{k}: {v.tolist()}')
+        return results
+
+    def _caps_over_loader_spatial_field(self, loader, coords_mode, reduce_across_ranks):
+        out_channels = self.net_mean.output_channels
+        sq_err_sum = torch.zeros(out_channels, device=self.device)
+        inside_sum = torch.zeros(out_channels, device=self.device)
+        width_sum = torch.zeros(out_channels, device=self.device)
+        y_sum = torch.zeros(out_channels, device=self.device)
+        y_sq_sum = torch.zeros(out_channels, device=self.device)
+        count = torch.zeros(out_channels, device=self.device)
+
+        c_up_field = self.c_up_field.numpy()    # (out_channels, field_h, field_w)
+        c_down_field = self.c_down_field.numpy()
+
+        with torch.no_grad():
+            for batch in loader:
+                if coords_mode == 'absolute':
+                    state, evaptrans, params, y, coord = batch
+                    coord = coord.numpy()
+                else:
+                    state, evaptrans, params, y = batch
+                    coord = None
+                state, evaptrans, params, y = self._prepare_batch((state, evaptrans, params, y))
+                mean_pred = self.net_mean(state, evaptrans, params)
+                up_pred = self.net_up(state, evaptrans, params)
+                down_pred = self.net_down(state, evaptrans, params)
+
+                batch_n, _, patch_h, patch_w = mean_pred.shape
+                local_h = np.arange(patch_h)[:, None]
+                local_w = np.arange(patch_w)[None, :]
+                if coords_mode == 'absolute':
+                    global_h = coord[:, 0][:, None, None] + local_h[None, :, :]
+                    global_w = coord[:, 1][:, None, None] + local_w[None, :, :]
+                    global_h = np.broadcast_to(global_h, (batch_n, patch_h, patch_w))
+                    global_w = np.broadcast_to(global_w, (batch_n, patch_h, patch_w))
+                else:
+                    global_h = np.broadcast_to(local_h[None, :, :], (batch_n, patch_h, patch_w))
+                    global_w = np.broadcast_to(local_w[None, :, :], (batch_n, patch_h, patch_w))
+
+                # c_up_pp[c, n, h, w] = c_up_field[c, global_h[n,h,w], global_w[n,h,w]]
+                # -- fancy-indexed in numpy (simpler to get right than torch's
+                # advanced-indexing broadcast rules for this exact gather),
+                # then moved to this batch's device/dtype for the arithmetic.
+                c_up_pp = c_up_field[:, global_h, global_w]
+                c_down_pp = c_down_field[:, global_h, global_w]
+                c_up_pp = torch.from_numpy(c_up_pp).to(mean_pred.dtype).to(self.device).permute(1, 0, 2, 3)
+                c_down_pp = torch.from_numpy(c_down_pp).to(mean_pred.dtype).to(self.device).permute(1, 0, 2, 3)
+
+                upper = mean_pred + c_up_pp * up_pred
+                lower = mean_pred - c_down_pp * down_pred
+                inside = ((y <= upper) & (y >= lower)).to(y.dtype)
+                width = upper - lower
+                sq_err = (mean_pred - y) ** 2
+                for c in range(out_channels):
+                    sq_err_sum[c] += sq_err[:, c].sum()
+                    inside_sum[c] += inside[:, c].sum()
+                    width_sum[c] += width[:, c].sum()
+                    y_sum[c] += y[:, c].sum()
+                    y_sq_sum[c] += (y[:, c] ** 2).sum()
+                    count[c] += inside[:, c].numel()
+
+        if reduce_across_ranks and dist.is_initialized():
+            for t in (sq_err_sum, inside_sum, width_sum, y_sum, y_sq_sum, count):
+                dist.all_reduce(t, op=dist.ReduceOp.SUM)
+
+        n = count.clamp_min(1)
+        picp = (inside_sum / n).cpu()
+        mpiw = (width_sum / n).cpu()
+        rmse = (sq_err_sum / n).sqrt().cpu()
+        ss_res = sq_err_sum
+        ss_tot = y_sq_sum - (y_sum ** 2) / n
+        r2 = (1 - ss_res / ss_tot.clamp_min(1e-12)).cpu()
+        return {'picp': picp, 'mpiw': mpiw, 'rmse': rmse, 'r2': r2}
+
+    def evaluate_spatial_field(self, verbose=0):
+        """Spatial-field analog of evaluate(): per-channel PICP/MPIW/
+        RMSE/R2 for train (rank-0-only full pass) and valid (every rank,
+        reduced), using self.c_up_field/self.c_down_field instead of
+        scalar c_up/c_down. Must be called after
+        boundary_optimization_spatial_field() (reads
+        self.spatial_field_coords_mode to know which loaders to use)."""
+        if self.c_up_field is None:
+            raise RuntimeError('evaluate_spatial_field() called before boundary_optimization_spatial_field()')
+        coords_mode = self.spatial_field_coords_mode
+        if coords_mode == 'absolute' and self.valid_dl_coords is None:
+            raise ValueError(
+                "coords_mode='absolute' needs valid_dl_coords (a DataLoader built from "
+                "ParFlowDataset(..., return_coords=True, split='valid')) passed to "
+                "PI3NNConvTrainer's constructor to evaluate the valid split."
+            )
+        self.net_mean.eval()
+        self.net_up.eval()
+        self.net_down.eval()
+
+        results = {}
+        if is_main_process():
+            train_loader = self.train_dl_full_coords if coords_mode == 'absolute' else self.train_dl_full
+            results['train'] = self._caps_over_loader_spatial_field(train_loader, coords_mode, reduce_across_ranks=False)
+        valid_loader = self.valid_dl_coords if coords_mode == 'absolute' else self.valid_dl
+        results['valid'] = self._caps_over_loader_spatial_field(valid_loader, coords_mode, reduce_across_ranks=True)
 
         if verbose > 0 and is_main_process():
             for split, metrics in results.items():

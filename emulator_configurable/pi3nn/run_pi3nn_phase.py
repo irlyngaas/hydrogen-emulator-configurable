@@ -36,7 +36,7 @@ import json
 from . import lightning_modules  # noqa: F401
 
 from ..train import train_model
-from .calibration import calibrate
+from .calibration import calibrate, calibrate_spatial_field
 
 
 def _ckpt_file(config, role):
@@ -136,7 +136,17 @@ def run_calibrate(config, up_down_mode):
     mean_ckpt = _read_ckpt(config, 'mean')
     up_ckpt = _read_ckpt(config, f'{up_down_mode}_up')
     down_ckpt = _read_ckpt(config, f'{up_down_mode}_down')
-    return calibrate(config, mean_ckpt, up_ckpt, down_ckpt, up_down_mode)
+    # config['calibration_mode'] defaults to 'scalar' -- today's one-
+    # constant-per-channel baseline, left completely unchanged -- so any
+    # existing config file that doesn't set this key keeps running
+    # exactly as before. 'spatial_field' is the new, additive option (see
+    # calibration.py's module-level comment for the three-stage design).
+    mode = config.get('calibration_mode', 'scalar')
+    if mode == 'scalar':
+        return calibrate(config, mean_ckpt, up_ckpt, down_ckpt, up_down_mode)
+    elif mode == 'spatial_field':
+        return calibrate_spatial_field(config, mean_ckpt, up_ckpt, down_ckpt, up_down_mode)
+    raise ValueError(f"unknown calibration_mode {mode!r}")
 
 
 def main():

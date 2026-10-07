@@ -19,7 +19,8 @@ class ParFlowDataset(Dataset):
         self, data_dir, run_name,
         parameter_list, patch_size, overlap,
         param_nlayer, n_evaptrans=0, dtype=torch.float64,
-        valid_fraction=0.0, split='train'
+        valid_fraction=0.0, split='train',
+        return_coords=False,
     ):
         super().__init__()
         self.base_dir = f'{data_dir}/{run_name}'
@@ -29,6 +30,16 @@ class ParFlowDataset(Dataset):
         self.n_evaptrans = n_evaptrans
         self.overlap = overlap
         self.dtype = dtype
+        # Additive, default-off: when True, __getitem__ also returns this
+        # sample's (y_min, x_min) -- its absolute position in the fixed
+        # CONUS1 domain grid (same grid/size every call, since X_EXTENT/
+        # Y_EXTENT come from the first pressure file and every pressure
+        # file in a run shares the same spatial grid). Needed only by
+        # pi3nn/trainer.py's boundary_optimization_spatial_field() in
+        # 'absolute' coordinate mode -- every other call site (training,
+        # 'patch_relative' calibration) is unaffected since the default
+        # keeps __getitem__'s return shape exactly as it was.
+        self.return_coords = return_coords
 
         self.pressure_files = sorted(glob(f'{self.base_dir}/transient/pressure*.pfb'))
         self.pressure_files = {
@@ -172,4 +183,8 @@ class ParFlowDataset(Dataset):
         evaptrans = torch.from_numpy(evaptrans).to(self.dtype)
         parameter_data = torch.from_numpy(parameter_data).to(self.dtype)
         target_data = torch.from_numpy(target_data).to(self.dtype)
+
+        if self.return_coords:
+            coords = torch.tensor([y_min, x_min], dtype=torch.long)
+            return state_data, evaptrans, parameter_data, target_data, coords
         return state_data, evaptrans, parameter_data, target_data

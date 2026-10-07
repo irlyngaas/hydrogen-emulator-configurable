@@ -20,6 +20,10 @@
     "quantile": 0.9,
     "early_stopping_patience": 10,
 
+    "calibration_mode": "spatial_field",
+    "spatial_field_coords": "patch_relative",
+    "spatial_field_rank": 3,
+
     "mean_model_config": {
         "num_layers": 2,
         "num_hidden": [16, 16],

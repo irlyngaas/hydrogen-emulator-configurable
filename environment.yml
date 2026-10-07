@@ -12,6 +12,7 @@ dependencies:
   - pytorch-cuda=11.7
   - xarray
   - xskillscore
+  - scipy
   - tqdm
   - dill
   - numcodecs

@@ -22,6 +22,8 @@ model_def:
   depth: 1
 pi3nn_configs:
   quantile: 0.95
+  calibration_mode: spatial_field
+  spatial_field_rank: 3
   max_epochs:        # small -- this is a smoke test on real data/shapes, not a real training run yet
     mean: 5
     up: 5

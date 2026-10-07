@@ -52,6 +52,7 @@ class ParFlowSequenceDataset(Dataset):
         param_nlayer, sequence_length, n_evaptrans=0,
         scalers=None, dtype=torch.float32,
         valid_fraction=0.0, split='train',
+        return_coords=False,
     ):
         super().__init__()
         self.base_dir = f'{data_dir}/{run_name}'
@@ -63,6 +64,16 @@ class ParFlowSequenceDataset(Dataset):
         self.sequence_length = sequence_length
         self.scalers = scalers or {}
         self.dtype = dtype
+        # Additive, default-off: when True, __getitem__ also returns this
+        # sample's (y_min, x_min) -- its absolute position in the fixed
+        # CONUS1 domain grid (same grid/size on every call, since
+        # Y_EXTENT/X_EXTENT come from the first pressure file and every
+        # pressure file in a run shares the same spatial grid). Needed
+        # only by pi3nn/calibration.py's calibrate_spatial_field() in
+        # 'absolute' coordinate mode -- every other call site (training,
+        # 'patch_relative' calibration) is unaffected since the default
+        # keeps __getitem__'s return shape exactly as it was.
+        self.return_coords = return_coords
 
         self.pressure_files = sorted(glob(f'{self.base_dir}/transient/pressure*.pfb'))
         self.evaptrans_files = sorted(glob(f'{self.base_dir}/transient/evaptrans*.pfb'))
@@ -230,4 +241,7 @@ class ParFlowSequenceDataset(Dataset):
         forcings = torch.stack(forcing_seq)   # (T, n_forcing, h, w)
         target = torch.stack(target_seq)      # (T, nz, h, w)
 
+        if self.return_coords:
+            coords = torch.tensor([y_min, x_min], dtype=torch.long)
+            return forcings, init_cond, static_inputs, target, coords
         return forcings, init_cond, static_inputs, target

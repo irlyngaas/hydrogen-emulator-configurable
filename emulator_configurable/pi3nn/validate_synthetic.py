@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,7 +34,11 @@ from torch.utils.data import Dataset
 
 from ..models import ForcedSTRNN
 from ..train import train_model
-from .calibration import calibrate
+from .boundary_optimizer import BoundaryOptimizer
+from .calibration import (
+    _caps_field, _dct_smooth, _fit_raw_cell_field, _fit_raw_cell_field_loop,
+    calibrate, calibrate_spatial_field,
+)
 from .lightning_modules import PI3NNUpDownModule
 from .losses import reduced_masked_mse_loss
 from .networks import build_updown_net, predict_updown
@@ -60,6 +65,33 @@ class SyntheticSequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.forcings[idx], self.init_cond[idx], self.static_inputs[idx], self.target[idx]
+
+
+class SyntheticCoordSequenceDataset(Dataset):
+    """Wraps a plain SyntheticSequenceDataset and adds a (y_min, x_min)
+    coords tensor plus Y_EXTENT/X_EXTENT attributes -- the same shape
+    ParFlowSequenceDataset(return_coords=True) provides, so
+    calibrate_spatial_field's 'absolute' coordinate mode can be exercised
+    without real .pfb files. Use `.inner` (a plain 4-tuple dataset) for
+    training mean/up/down -- their training_step/_step unpack exactly 4
+    elements -- and the wrapper itself (5-tuple) only for the calibration
+    call, matching how real code only requests coords for calibration."""
+
+    def __init__(self, n, sequence_length, act_channel, static_channel, state_channel, patch, y_extent, x_extent, seed):
+        self.inner = SyntheticSequenceDataset(n, sequence_length, act_channel, static_channel, state_channel, patch, seed)
+        self.Y_EXTENT = y_extent
+        self.X_EXTENT = x_extent
+        g = torch.Generator().manual_seed(seed + 1000)
+        y_min = torch.randint(0, y_extent - patch + 1, (n,), generator=g)
+        x_min = torch.randint(0, x_extent - patch + 1, (n,), generator=g)
+        self.coords = torch.stack([y_min, x_min], dim=1)
+
+    def __len__(self):
+        return len(self.inner)
+
+    def __getitem__(self, idx):
+        forcings, init_cond, static_inputs, target = self.inner[idx]
+        return forcings, init_cond, static_inputs, target, self.coords[idx]
 
 
 def make_mean_config():
@@ -280,6 +312,259 @@ def check_run_pi3nn_phase_registers_updown():
     print('PASS: importing run_pi3nn_phase alone registers PI3NNUpDownModule (no hidden import-order dependency).')
 
 
+def check_dct_smooth_rank1_is_spatial_mean():
+    """rank=1 keeps only the DC coefficient -- algebraically this must
+    collapse the field to its own flat spatial mean everywhere (the
+    rank=1 case is what makes spatial-field calibration a strict
+    generalization of calibrate()'s scalar baseline, not a parallel
+    mechanism)."""
+    rng = np.random.RandomState(0)
+    field = rng.randn(6, 7)
+    smoothed = _dct_smooth(field, 1)
+    assert np.allclose(smoothed, field.mean(), atol=1e-8), 'rank=1 DCT smoothing should collapse to the spatial mean'
+    print('PASS: spatial-field rank=1 collapses to the field\'s own spatial mean (scalar-baseline equivalent).')
+
+
+def check_spatial_field_vectorized_matches_loop_reference():
+    """_fit_raw_cell_field was rewritten to run every cell's bisection
+    search simultaneously via np.bincount (cost ~independent of n_cells)
+    instead of one BoundaryOptimizer object per cell in a Python loop
+    (cost scales with n_cells) -- the fix for the scalability concern
+    flagged when 'absolute' coordinate mode was designed. Confirms the
+    faster version agrees with the original, still-correct loop
+    implementation (kept as _fit_raw_cell_field_loop) on the same random
+    multi-cell data, uneven cell sizes included (not every cell gets the
+    same point count, matching 'absolute' mode's real uneven coverage)."""
+    rng = np.random.RandomState(123)
+    n_cells = 40
+    cell_index, y, mean, up, down = [], [], [], [], []
+    for cell in range(n_cells):
+        # Deliberately uneven per-cell counts (20-120 points) -- the
+        # thing that makes 'absolute' mode harder than 'patch_relative'.
+        n_pts = rng.randint(20, 120)
+        scale = 0.5 + rng.rand()
+        y.append(rng.randn(n_pts) * scale)
+        mean.append(rng.randn(n_pts) * 0.1)
+        up.append(np.abs(rng.randn(n_pts)) + 0.5)
+        down.append(np.abs(rng.randn(n_pts)) + 0.5)
+        cell_index.append(np.full(n_pts, cell))
+    y, mean = np.concatenate(y), np.concatenate(mean)
+    up, down = np.concatenate(up), np.concatenate(down)
+    cell_index = np.concatenate(cell_index).astype(np.int64)
+
+    c_up_vec, c_down_vec = _fit_raw_cell_field(y, mean, up, down, cell_index, n_cells, quantile=0.9)
+    c_up_loop, c_down_loop = _fit_raw_cell_field_loop(y, mean, up, down, cell_index, n_cells, quantile=0.9)
+
+    assert np.allclose(c_up_vec, c_up_loop, atol=1e-6), 'vectorized c_up disagrees with the loop reference'
+    assert np.allclose(c_down_vec, c_down_loop, atol=1e-6), 'vectorized c_down disagrees with the loop reference'
+    print('PASS: vectorized per-cell bisection matches the original per-cell-loop reference exactly.')
+
+
+def check_spatial_field_recovers_smooth_pattern():
+    """Isolates stages 1-2 (per-cell raw fit + DCT smoothing) from the
+    rest of the pipeline using hand-built synthetic data with a KNOWN
+    smooth per-cell noise scale, net_up/net_down held at a constant 1 so
+    the raw per-cell c_up IS (up to sampling noise and a shared constant)
+    proportional to the true scale. Checks that a higher-rank smoothed
+    field actually resembles that known shape, not just that the code
+    runs."""
+    rng = np.random.RandomState(42)
+    H, W = 6, 6
+    n_per_cell = 400
+    hh = np.arange(H)
+    true_scale = 1.0 + 0.8 * np.cos(np.pi * hh / H)  # smooth along H, constant along W
+    true_scale_field = np.broadcast_to(true_scale[:, None], (H, W))
+
+    cell_index, y, mean, up, down = [], [], [], [], []
+    for h in range(H):
+        for w in range(W):
+            cell = h * W + w
+            noise = rng.randn(n_per_cell) * true_scale[h]
+            y.append(noise)
+            mean.append(np.zeros(n_per_cell))
+            up.append(np.ones(n_per_cell))
+            down.append(np.ones(n_per_cell))
+            cell_index.append(np.full(n_per_cell, cell))
+    y, mean = np.concatenate(y), np.concatenate(mean)
+    up, down = np.concatenate(up), np.concatenate(down)
+    cell_index = np.concatenate(cell_index).astype(np.int64)
+
+    c_up_raw, _ = _fit_raw_cell_field(y, mean, up, down, cell_index, H * W, quantile=0.9)
+    smoothed = _dct_smooth(c_up_raw.reshape(H, W), rank=3)
+
+    true_dev = (true_scale_field - true_scale_field.mean()).flatten()
+    smooth_dev = (smoothed - smoothed.mean()).flatten()
+    cos_sim = np.dot(true_dev, smooth_dev) / (np.linalg.norm(true_dev) * np.linalg.norm(smooth_dev) + 1e-12)
+    assert cos_sim > 0.8, f'smoothed field does not resemble the known smooth pattern (cosine similarity={cos_sim:.3f})'
+    print(f'PASS: rank=3 spatial field recovers the known smooth pattern shape (cosine similarity={cos_sim:.3f}).')
+
+
+def check_spatial_field_global_coverage_restored():
+    """Stage 3 check: smoothing (stage 2) perturbs each cell away from
+    its own stage-1 optimum, which can drag the pooled global coverage
+    off the target quantile. Confirms the one extra global
+    BoundaryOptimizer call (reused unmodified, fed up/down pre-
+    multiplied by the smoothed field) actually restores it."""
+    rng = np.random.RandomState(7)
+    H, W = 5, 5
+    n_per_cell = 300
+    quantile = 0.9
+    hh = np.arange(H)
+    true_scale = 1.0 + 0.6 * np.sin(np.pi * hh / H)
+
+    cell_index, y, mean, up, down = [], [], [], [], []
+    for h in range(H):
+        for w in range(W):
+            cell = h * W + w
+            noise = rng.randn(n_per_cell) * true_scale[h]
+            y.append(noise)
+            mean.append(np.zeros(n_per_cell))
+            up.append(np.ones(n_per_cell))
+            down.append(np.ones(n_per_cell))
+            cell_index.append(np.full(n_per_cell, cell))
+    y, mean = np.concatenate(y), np.concatenate(mean)
+    up, down = np.concatenate(up), np.concatenate(down)
+    cell_index = np.concatenate(cell_index).astype(np.int64)
+    n_cells = H * W
+
+    c_up_raw, c_down_raw = _fit_raw_cell_field(y, mean, up, down, cell_index, n_cells, quantile)
+    c_up_smooth = _dct_smooth(c_up_raw.reshape(H, W), rank=2)
+    c_down_smooth = _dct_smooth(c_down_raw.reshape(H, W), rank=2)
+
+    c_up_smooth_pp = c_up_smooth.reshape(-1)[cell_index]
+    c_down_smooth_pp = c_down_smooth.reshape(-1)[cell_index]
+    num_outlier = int(y.shape[0] * (1 - quantile) / 2)
+    opt = BoundaryOptimizer(
+        y, mean, up * c_up_smooth_pp, down * c_down_smooth_pp, num_outlier=num_outlier,
+        c_up0_ini=0.0, c_up1_ini=100000.0, c_down0_ini=0.0, c_down1_ini=100000.0, max_iter=1000,
+    )
+    alpha_up, alpha_down = opt.optimize_up(), opt.optimize_down()
+    c_up_field, c_down_field = alpha_up * c_up_smooth, alpha_down * c_down_smooth
+
+    c_up_final_pp = c_up_field.reshape(-1)[cell_index]
+    c_down_final_pp = c_down_field.reshape(-1)[cell_index]
+    picp, mpiw, rmse, r2, inside = _caps_field(y, mean, up, down, c_up_final_pp, c_down_final_pp)
+    assert abs(picp - quantile) < 0.02, f'global PICP {picp:.4f} not close to target quantile {quantile} after stage-3 rescale'
+    print(f'PASS: stage-3 global rescale restores target coverage after smoothing (picp={picp:.4f}, target={quantile}).')
+
+
+def check_spatial_field_patch_relative_integration():
+    """End-to-end integration through the real dataloader/network stack
+    (not hand-built arrays like the checks above) -- reuses
+    check_full_sequence's pattern: train mean -> up -> down, then run
+    calibrate_spatial_field in 'patch_relative' mode (the default, no
+    coords needed) and sanity-check the result shape."""
+    torch.manual_seed(50)
+    mean_config = make_mean_config()
+    seq_len = 3
+    patch = 8
+    train_ds = SyntheticSequenceDataset(16, seq_len, mean_config['act_channel'], mean_config['static_channel'], mean_config['out_channel'], patch, seed=60)
+
+    common = dict(
+        data_dir='', parameter_list=[], param_nlayer=[], patch_size=0, overlap=0,
+        sequence_length=seq_len, batch_size=4, num_workers=0, precision='32',
+        device='cpu', gradient_loss_penalty=False, logging_frequency=1,
+        valid_fraction=0.0, early_stopping_patience=None,
+    )
+    with tempfile.TemporaryDirectory() as logdir:
+        mean_ckpt = train_model(
+            run_name='synthetic_spatial_mean', model_type='ForcedSTRNN', model_config=mean_config,
+            max_epochs=1, learning_rate=0.01, logging_location=logdir,
+            train_dataset=train_ds, valid_dataset=train_ds, **common,
+        )
+        up_down_mode = 'stateless_output'
+        updown_config = make_updown_config(up_down_mode, mean_config)
+        role_ckpts = {}
+        for role in ('up', 'down'):
+            role_ckpts[role] = train_model(
+                run_name=f'synthetic_spatial_{role}', model_type='PI3NNUpDownModule',
+                model_config={
+                    'up_down_mode': up_down_mode, 'role': role,
+                    'mean_model_type': 'ForcedSTRNN', 'mean_model_config': mean_config,
+                    'mean_ckpt_path': mean_ckpt, 'updown_config': updown_config,
+                },
+                max_epochs=1, learning_rate=0.01, logging_location=logdir,
+                train_dataset=train_ds, valid_dataset=train_ds, **common,
+            )
+        results = calibrate_spatial_field(
+            config={
+                'mean_model_config': mean_config,
+                'updown_model_config': {up_down_mode: updown_config},
+                'quantile': 0.9, 'logging_location': logdir, 'experiment_name': 'synthetic_spatial',
+                'batch_size': common['batch_size'], 'num_workers': common['num_workers'],
+                'spatial_field_rank': 2,
+            },
+            mean_ckpt_path=mean_ckpt, up_ckpt_path=role_ckpts['up'], down_ckpt_path=role_ckpts['down'],
+            up_down_mode=up_down_mode, train_dataset=train_ds,
+        )
+        assert len(results) == mean_config['out_channel']
+        for ch, res in results.items():
+            field = np.array(res['c_up_field'])
+            assert field.shape == (patch, patch), f'{ch}: c_up_field shape {field.shape} != ({patch},{patch})'
+    print("PASS: calibrate_spatial_field runs end-to-end in 'patch_relative' mode (default) through the real pipeline.")
+
+
+def check_spatial_field_absolute_mode():
+    """Same integration shape as check_spatial_field_patch_relative_
+    integration, but exercises 'absolute' coordinate mode via
+    SyntheticCoordSequenceDataset -- confirms ParFlowSequenceDataset's
+    new return_coords plumbing and the global-domain field assembly in
+    calibrate_spatial_field actually wire together, producing a field
+    sized to the full synthetic domain rather than one patch."""
+    torch.manual_seed(51)
+    mean_config = make_mean_config()
+    seq_len = 2
+    patch = 4
+    y_extent, x_extent = 10, 10
+    train_ds = SyntheticCoordSequenceDataset(
+        40, seq_len, mean_config['act_channel'], mean_config['static_channel'], mean_config['out_channel'],
+        patch, y_extent, x_extent, seed=70,
+    )
+
+    common = dict(
+        data_dir='', parameter_list=[], param_nlayer=[], patch_size=0, overlap=0,
+        sequence_length=seq_len, batch_size=4, num_workers=0, precision='32',
+        device='cpu', gradient_loss_penalty=False, logging_frequency=1,
+        valid_fraction=0.0, early_stopping_patience=None,
+    )
+    with tempfile.TemporaryDirectory() as logdir:
+        mean_ckpt = train_model(
+            run_name='synthetic_abs_mean', model_type='ForcedSTRNN', model_config=mean_config,
+            max_epochs=1, learning_rate=0.01, logging_location=logdir,
+            train_dataset=train_ds.inner, valid_dataset=train_ds.inner, **common,
+        )
+        up_down_mode = 'stateless_output'
+        updown_config = make_updown_config(up_down_mode, mean_config)
+        role_ckpts = {}
+        for role in ('up', 'down'):
+            role_ckpts[role] = train_model(
+                run_name=f'synthetic_abs_{role}', model_type='PI3NNUpDownModule',
+                model_config={
+                    'up_down_mode': up_down_mode, 'role': role,
+                    'mean_model_type': 'ForcedSTRNN', 'mean_model_config': mean_config,
+                    'mean_ckpt_path': mean_ckpt, 'updown_config': updown_config,
+                },
+                max_epochs=1, learning_rate=0.01, logging_location=logdir,
+                train_dataset=train_ds.inner, valid_dataset=train_ds.inner, **common,
+            )
+        results = calibrate_spatial_field(
+            config={
+                'mean_model_config': mean_config,
+                'updown_model_config': {up_down_mode: updown_config},
+                'quantile': 0.9, 'logging_location': logdir, 'experiment_name': 'synthetic_abs',
+                'batch_size': common['batch_size'], 'num_workers': common['num_workers'],
+                'spatial_field_coords': 'absolute', 'spatial_field_rank': 2,
+            },
+            mean_ckpt_path=mean_ckpt, up_ckpt_path=role_ckpts['up'], down_ckpt_path=role_ckpts['down'],
+            up_down_mode=up_down_mode, train_dataset=train_ds,
+        )
+        assert len(results) == mean_config['out_channel']
+        for ch, res in results.items():
+            field = np.array(res['c_up_field'])
+            assert field.shape == (y_extent, x_extent), f'{ch}: c_up_field shape {field.shape} != ({y_extent},{x_extent})'
+    print("PASS: calibrate_spatial_field runs end-to-end in 'absolute' coordinate mode, producing a full-domain field.")
+
+
 def run_full():
     check_positivity_all_modes()
     check_return_hidden_preserves_behavior()
@@ -288,6 +573,12 @@ def run_full():
     check_recurrent_clone_positivity()
     check_full_sequence()
     check_run_pi3nn_phase_registers_updown()
+    check_dct_smooth_rank1_is_spatial_mean()
+    check_spatial_field_vectorized_matches_loop_reference()
+    check_spatial_field_recovers_smooth_pattern()
+    check_spatial_field_global_coverage_restored()
+    check_spatial_field_patch_relative_integration()
+    check_spatial_field_absolute_mode()
     print('PASS: all synthetic validation checks passed.')
 
 

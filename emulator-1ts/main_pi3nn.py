@@ -32,6 +32,21 @@ def read_config(config_path):
         return yaml.safe_load(f)
 
 
+def custom_collate_with_coords(batch):
+    """custom_collate handles exactly 4 elements per sample and would
+    silently drop a 5th -- needed only for the coords-bearing loaders
+    built when pi3nn_configs['calibration_mode'] == 'spatial_field' and
+    pi3nn_configs['spatial_field_coords'] == 'absolute'."""
+    s, e, p, y, c = [], [], [], [], []
+    for b in batch:
+        s.append(b[0])
+        e.append(b[1])
+        p.append(b[2])
+        y.append(b[3])
+        c.append(b[4])
+    return torch.stack(s), torch.stack(e), torch.stack(p), torch.stack(y), torch.stack(c)
+
+
 def train(
     name, log_location, data_def, model_def, pi3nn_configs,
     device, num_workers, dtype, batch_size, valid_fraction=0.1,
@@ -78,6 +93,28 @@ def train(
         shuffle=False, num_workers=num_workers,
     )
 
+    # Only built when pi3nn_configs asks for spatial-field calibration in
+    # 'absolute' coordinate mode -- a SEPARATE pair of ParFlowDataset
+    # instances (return_coords=True), not a return_coords flip on train_ds/
+    # valid_ds themselves, so train_dl/valid_dl (used for ordinary SGD
+    # training every epoch) keep their existing 4-tuple contract exactly as
+    # it was. 'patch_relative' mode (the default) needs none of this --
+    # it reuses train_dl_full/valid_dl directly, same as the scalar path.
+    train_dl_full_coords = valid_dl_coords = None
+    calibration_mode = pi3nn_configs.get('calibration_mode', 'scalar')
+    spatial_field_coords = pi3nn_configs.get('spatial_field_coords', 'patch_relative')
+    if calibration_mode == 'spatial_field' and spatial_field_coords == 'absolute':
+        train_ds_coords = ParFlowDataset(**data_def, dtype=dtype, valid_fraction=valid_fraction, split='train', return_coords=True)
+        valid_ds_coords = ParFlowDataset(**data_def, dtype=dtype, valid_fraction=valid_fraction, split='valid', return_coords=True)
+        train_dl_full_coords = DataLoader(
+            train_ds_coords, batch_size=batch_size, collate_fn=custom_collate_with_coords,
+            shuffle=False, num_workers=num_workers,
+        )
+        valid_dl_coords = DataLoader(
+            valid_ds_coords, batch_size=batch_size, collate_fn=custom_collate_with_coords,
+            shuffle=False, num_workers=num_workers,
+        )
+
     model_def = dict(model_def)
     model_def['pressure_names'] = train_ds.PRESSURE_NAMES
     model_def['evaptrans_names'] = train_ds.EVAPTRANS_NAMES
@@ -97,28 +134,39 @@ def train(
         pi3nn_configs, net_mean, net_up, net_down,
         train_dl, valid_dl, train_dl_full,
         train_sampler=train_sampler, device=device,
+        train_dl_full_coords=train_dl_full_coords, valid_dl_coords=valid_dl_coords,
     )
     trainer.train()
-    trainer.boundary_optimization(verbose=pi3nn_configs.get('verbose', 0))
-    results = trainer.evaluate(verbose=pi3nn_configs.get('verbose', 0))
+
+    verbose = pi3nn_configs.get('verbose', 0)
+    save_dict = {
+        'net_mean': trainer.net_mean.state_dict(),
+        'net_up': trainer.net_up.state_dict(),
+        'net_down': trainer.net_down.state_dict(),
+        'model_def': model_def,
+    }
+    if calibration_mode == 'scalar':
+        trainer.boundary_optimization(verbose=verbose)
+        results = trainer.evaluate(verbose=verbose)
+        save_dict['c_up'] = trainer.c_up
+        save_dict['c_down'] = trainer.c_down
+    elif calibration_mode == 'spatial_field':
+        spatial_field_rank = pi3nn_configs.get('spatial_field_rank', 3)
+        trainer.boundary_optimization_spatial_field(coords_mode=spatial_field_coords, rank=spatial_field_rank, verbose=verbose)
+        results = trainer.evaluate_spatial_field(verbose=verbose)
+        save_dict['c_up_field'] = trainer.c_up_field
+        save_dict['c_down_field'] = trainer.c_down_field
+        save_dict['spatial_field_coords'] = spatial_field_coords
+    else:
+        raise ValueError(f"unknown calibration_mode {calibration_mode!r}")
+    save_dict['results'] = results
 
     if is_main_process():
         print('----------------------------------------')
         print(results)
         print('----------------------------------------')
         os.makedirs(log_location, exist_ok=True)
-        torch.save(
-            {
-                'net_mean': trainer.net_mean.state_dict(),
-                'net_up': trainer.net_up.state_dict(),
-                'net_down': trainer.net_down.state_dict(),
-                'c_up': trainer.c_up,
-                'c_down': trainer.c_down,
-                'model_def': model_def,
-                'results': results,
-            },
-            f'{log_location}/{name}_pi3nn.pth',
-        )
+        torch.save(save_dict, f'{log_location}/{name}_pi3nn.pth')
         print(f'Saved to {log_location}/{name}_pi3nn.pth')
 
     if distributed:

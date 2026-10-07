@@ -10,6 +10,7 @@ setup(
         'torch',
         'pytorch-lightning',
         'numpy',
+        'scipy',
         'xarray',
         'pandas',
         'dask[diagnostics]',
