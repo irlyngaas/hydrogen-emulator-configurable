@@ -11,6 +11,11 @@ data_def:
   parameter_list: ['slope_x', 'slope_y', 'pme', 'ss_pressure_head', 'pf_indicator', 'porosity', 'permeability', 'van_genuchten_alpha', 'van_genuchten_n']
   patch_size: 16
   overlap: 4
+  valid_block_count: 12  # one block per calendar month for a full-year pull -- every month
+                          # contributes to both train and valid, instead of valid being one
+                          # single contiguous tail chunk (which, on a full year, meant valid
+                          # only ever saw late-August/September). Set back to 1 (or omit) to
+                          # reproduce the original single-tail-holdout behavior exactly.
   scaler_yaml: FILL_IN_PATH_FROM_compute_conus1_scalers.py  # same scaler yaml conus1_boxtest_config.yaml uses -- e.g. /path/to/conus1_scalers.yaml
   param_nlayer: [0, 0, 0, 0, 0, 0, 0, 0, 0]  # 0 = use all layers for each param
   n_evaptrans: 1  # confirmed from evaptrans shape (T, ny, nx) -- no z-dimension

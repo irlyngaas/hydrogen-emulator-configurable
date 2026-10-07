@@ -13,6 +13,40 @@ from parflow.tools.io import read_pfb
 from torch.utils.data import Dataset
 
 
+def time_block_split(n, valid_fraction, split, valid_block_count=1):
+    """Returns the sorted list of indices in [0, n) belonging to `split`
+    ('train' or 'valid'). valid_block_count=1 (default) reproduces the
+    original single-tail-holdout behavior exactly: one block spanning
+    the whole range, earliest (1-valid_fraction) = train, latest
+    valid_fraction = valid. >1 divides [0, n) into that many roughly-
+    equal contiguous blocks and applies the SAME tail-holdout
+    independently within each block, then pools every block's train (or
+    valid) indices together -- so every block (e.g. one block per
+    calendar month, valid_block_count=12) contributes to BOTH splits,
+    instead of validation being one single contiguous chunk at the very
+    end of the whole range. That matters for anything spanning more
+    than about one season: with a single block, validation only ever
+    sees whatever narrow window the tail happens to fall in (confirmed
+    a real problem on a full-year CONUS1 run -- see
+    pi3nn_frontier_status memory), rather than a representative sample
+    across the full range the model was trained on.
+
+    Pure index arithmetic, no I/O -- kept as a standalone function
+    (not inlined in ParFlowDataset.__init__) specifically so it's
+    testable without needing real .pfb files."""
+    assert split in ('train', 'valid')
+    block_edges = np.linspace(0, n, valid_block_count + 1).round().astype(int)
+    train_idx, valid_idx = [], []
+    for b in range(valid_block_count):
+        lo, hi = int(block_edges[b]), int(block_edges[b + 1])
+        block_n = hi - lo
+        block_n_valid = max(1, int(round(block_n * valid_fraction)))
+        block_n_train = block_n - block_n_valid
+        train_idx.extend(range(lo, lo + block_n_train))
+        valid_idx.extend(range(lo + block_n_train, hi))
+    return train_idx if split == 'train' else valid_idx
+
+
 class ParFlowDataset(Dataset):
 
     def __init__(
@@ -20,7 +54,7 @@ class ParFlowDataset(Dataset):
         parameter_list, patch_size, overlap,
         param_nlayer, n_evaptrans=0, dtype=torch.float64,
         valid_fraction=0.0, split='train',
-        return_coords=False,
+        return_coords=False, valid_block_count=1,
     ):
         super().__init__()
         self.base_dir = f'{data_dir}/{run_name}'
@@ -47,17 +81,17 @@ class ParFlowDataset(Dataset):
             't+1': self.pressure_files[1:]
         }
 
-        # Time-based train/valid split: earliest (1-valid_fraction) of
-        # transient timesteps = train, latest valid_fraction = valid.
-        # valid_fraction=0.0 (default) is a no-op slice, so every existing
-        # config/call site that doesn't pass these two kwargs sees exactly
-        # today's behavior (the full dataset, unsplit).
+        # Time-based train/valid split -- see time_block_split's docstring.
+        # valid_fraction=0.0 (default) is a no-op, so every existing
+        # config/call site that doesn't pass these kwargs sees exactly
+        # today's behavior (the full dataset, unsplit). valid_block_count=1
+        # (default) reproduces the original single-tail-holdout behavior
+        # exactly, so existing configs that only set valid_fraction/split
+        # are unaffected unless they opt into valid_block_count > 1.
         if valid_fraction > 0:
             n = len(self.pressure_files['t'])
-            n_valid = max(1, int(round(n * valid_fraction)))
-            n_train = n - n_valid
-            sl = slice(0, n_train) if split == 'train' else slice(n_train, n)
-            self.pressure_files = {k: v[sl] for k, v in self.pressure_files.items()}
+            idx = time_block_split(n, valid_fraction, split, valid_block_count)
+            self.pressure_files = {k: [v[i] for i in idx] for k, v in self.pressure_files.items()}
 
         self.size_test = read_pfb(self.pressure_files['t'][0])
         self.X_EXTENT = self.size_test.shape[2] 
