@@ -121,7 +121,18 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
     model_def = save_dict['model_def']
     dtype = get_dtype(config.get('dtype', 'float32'))
 
-    net_mean, net_up, net_down = build_networks(model_def)
+    # eps/bias_init are plain Python attributes on PositiveResNetWrapper,
+    # not part of state_dict() -- build_networks(model_def) alone would
+    # silently reconstruct net_up/net_down with ITS OWN defaults (eps=0.2)
+    # regardless of what this .pth was actually trained with, corrupting
+    # PositiveBias's activation floor while the conv weights still load
+    # correctly via load_state_dict below (this is exactly what was
+    # happening before main_pi3nn.py started saving these two keys).
+    bias_init = save_dict.get('bias_init', 3.0)
+    eps = save_dict.get('eps', 0.2)
+    print(f'[plot_prediction] loaded bias_init={bias_init!r}, eps={eps!r} from {pth_path} '
+          f'(floor=sqrt(eps)={eps**0.5:.4g})')
+    net_mean, net_up, net_down = build_networks(model_def, bias_init=bias_init, eps=eps)
     net_mean.load_state_dict(save_dict['net_mean'])
     net_up.load_state_dict(save_dict['net_up'])
     net_down.load_state_dict(save_dict['net_down'])

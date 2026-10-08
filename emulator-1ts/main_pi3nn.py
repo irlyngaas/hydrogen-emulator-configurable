@@ -164,6 +164,16 @@ def train(
         'net_up': trainer.net_up.state_dict(),
         'net_down': trainer.net_down.state_dict(),
         'model_def': model_def,
+        # eps is a plain Python attribute on PositiveResNetWrapper (not a
+        # registered buffer/parameter), so it is NOT captured by
+        # state_dict() above -- a reload that calls build_networks(model_def)
+        # without these would silently reconstruct net_up/net_down with
+        # build_networks' OWN defaults (eps=0.2) regardless of what this run
+        # actually trained with, corrupting PositiveBias's activation floor
+        # while the conv weights themselves still load correctly (exactly
+        # what happened to plot_prediction.py before this was saved here).
+        'bias_init': bias_init,
+        'eps': eps,
     }
     if calibration_mode == 'scalar':
         trainer.boundary_optimization(verbose=verbose)

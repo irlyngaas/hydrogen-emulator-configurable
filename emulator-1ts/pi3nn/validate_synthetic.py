@@ -480,6 +480,47 @@ def check_spatial_field_patch_relative_integration():
         assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_prediction produced no (or an empty) PNG'
     print('PASS: plot_prediction.load_and_plot renders mean/bounds for a real sample without error.')
 
+    # Regression check for a real bug caught on Frontier: eps is a plain
+    # Python attribute on PositiveResNetWrapper, not part of state_dict(),
+    # so a .pth saved WITHOUT 'eps'/'bias_init' silently reconstructs
+    # net_up/net_down with build_networks' OWN defaults (eps=0.2) on reload
+    # -- the conv weights still load correctly via load_state_dict, so this
+    # has no visible symptom except a wrong PositiveBias floor. Uses a
+    # deliberately non-default eps (the prior check above always used the
+    # default on both sides, which could never have caught this) and
+    # captures stdout for plot_prediction's own diagnostic print rather
+    # than threading a new return value through just for this test.
+    import contextlib
+    import io
+    custom_eps, custom_bias_init = 1e-4, 2.5
+    net_mean2, net_up2, net_down2 = build_networks(model_def, bias_init=custom_bias_init, eps=custom_eps)
+    net_mean2, net_up2, net_down2 = (n.to(torch.float64) for n in (net_mean2, net_up2, net_down2))
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn_customeps.pth')
+        torch.save({
+            'net_mean': net_mean2.state_dict(), 'net_up': net_up2.state_dict(), 'net_down': net_down2.state_dict(),
+            'model_def': model_def, 'c_up_field': trainer.c_up_field, 'c_down_field': trainer.c_down_field,
+            'bias_init': custom_bias_init, 'eps': custom_eps,
+        }, pth_path)
+        config_path = os.path.join(d, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump({'dtype': 'float64'}, f)
+        png_path = os.path.join(d, 'check_prediction_customeps.png')
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            load_and_plot_prediction(pth_path, config_path, split='train', index=0, out_path=png_path, dataset=train_ds)
+        output = captured.getvalue()
+        # Directly tests the bug: build_networks(model_def) alone (no
+        # bias_init=/eps= kwargs) would reconstruct with its OWN defaults
+        # (eps=0.2) regardless of what's in the .pth -- this print only
+        # shows custom_eps if load_and_plot actually read 'eps' back out
+        # of save_dict and threaded it into build_networks.
+        assert f'eps={custom_eps!r}' in output, (
+            f"plot_prediction did not report the saved custom eps={custom_eps!r} on reload -- "
+            f"got:\n{output}"
+        )
+    print('PASS: plot_prediction.load_and_plot reconstructs net_up/net_down with the SAVED (non-default) eps/bias_init, not build_networks defaults.')
+
     from .plot_spatial_field import load_and_plot_pth
     with tempfile.TemporaryDirectory() as d:
         pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
