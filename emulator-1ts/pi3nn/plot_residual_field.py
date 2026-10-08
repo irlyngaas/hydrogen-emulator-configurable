@@ -109,6 +109,18 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
         valid_fraction = config.get('valid_fraction', 0.1)
         ds = ParFlowDataset(**data_def, dtype=dtype, valid_fraction=valid_fraction, split=split)
 
+    # ParFlowDataset's bgen is built with shuffle=True, so --index does NOT
+    # correspond to a stable or sequential point in time -- whether it even
+    # resolves to the SAME real timestep across separate process runs
+    # depends on xbatcher's shuffle being deterministic, which isn't
+    # verified here. Resolving and printing the real underlying file
+    # removes any dependence on that assumption: it's what THIS run of the
+    # script actually used, not an inference from a separate lookup.
+    if hasattr(ds, 'bgen') and hasattr(ds, 'pressure_files'):
+        time_index = ds.bgen[index]['time'].values[0]
+        print(f'[plot_residual_field] --index {index} (split={split!r}) resolved to '
+              f'time_index={time_index}, file={ds.pressure_files["t"][time_index]}')
+
     state, evaptrans, params, target = ds[index]
     state, evaptrans, params, target = (t.unsqueeze(0) for t in (state, evaptrans, params, target))
     target_scaled = target.clone()
