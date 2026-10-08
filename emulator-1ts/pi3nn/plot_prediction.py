@@ -58,12 +58,19 @@ def compute_bounds(mean_pred, up_pred, down_pred, c_up, c_down):
 
 def plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_names=None):
     """mean_pred/upper/lower/width: (out_channels, H, W) numpy arrays.
-    Saves one PNG, one row per channel, four columns (mean, lower,
-    upper, width) -- lower before upper so reading left-to-right tracks
-    the physical ordering of the interval. mean/lower/upper share one
-    color scale per channel (same physical quantity, directly
-    comparable); width gets its own (a different quantity, always
-    >= 0)."""
+    Saves one PNG, one row per channel, four columns: mean (its own
+    color scale), down-offset (mean - lower), up-offset (upper - mean),
+    width (upper - lower). Plotting raw lower/upper on the SAME scale as
+    mean (an earlier version of this function did) breaks badly
+    whenever the calibrated bound is narrow relative to the mean
+    field's own spatial range -- which is the common case, since the
+    bound only needs to span the residual, not the signal -- making
+    mean/lower/upper look visually identical and the plot uninformative
+    (caught by the user looking at a real rendered plot). Plotting the
+    OFFSETS instead, on their own shared scale, shows the actual
+    spatial pattern in the bounds regardless of how it compares to
+    mean's own range, and additionally reveals asymmetry between the
+    up and down bound that width alone collapses away."""
     import matplotlib.pyplot as plt
 
     out_channels = mean_pred.shape[0]
@@ -71,17 +78,22 @@ def plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_nam
     fig, axes = plt.subplots(out_channels, 4, figsize=(16, 3.2 * out_channels), squeeze=False)
 
     for c in range(out_channels):
-        ax_mean, ax_lower, ax_upper, ax_width = axes[c]
-        vmin = min(mean_pred[c].min(), lower[c].min(), upper[c].min())
-        vmax = max(mean_pred[c].max(), lower[c].max(), upper[c].max())
-        for ax, field, label in (
-            (ax_mean, mean_pred[c], 'mean'),
-            (ax_lower, lower[c], 'lower'),
-            (ax_upper, upper[c], 'upper'),
-        ):
-            im = ax.imshow(field, cmap='viridis', vmin=vmin, vmax=vmax)
-            ax.set_title(f'{channel_names[c]}: {label}')
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax_mean, ax_down_off, ax_up_off, ax_width = axes[c]
+
+        im_mean = ax_mean.imshow(mean_pred[c], cmap='viridis')
+        ax_mean.set_title(f'{channel_names[c]}: mean')
+        fig.colorbar(im_mean, ax=ax_mean, fraction=0.046, pad=0.04)
+
+        down_offset = mean_pred[c] - lower[c]   # >= 0
+        up_offset = upper[c] - mean_pred[c]     # >= 0
+        off_vmax = max(down_offset.max(), up_offset.max(), 1e-12)
+        im_down = ax_down_off.imshow(down_offset, cmap='magma', vmin=0, vmax=off_vmax)
+        ax_down_off.set_title(f'{channel_names[c]}: mean - lower (down offset)')
+        fig.colorbar(im_down, ax=ax_down_off, fraction=0.046, pad=0.04)
+
+        im_up = ax_up_off.imshow(up_offset, cmap='magma', vmin=0, vmax=off_vmax)
+        ax_up_off.set_title(f'{channel_names[c]}: upper - mean (up offset)')
+        fig.colorbar(im_up, ax=ax_up_off, fraction=0.046, pad=0.04)
 
         im_w = ax_width.imshow(width[c], cmap='magma')
         ax_width.set_title(f'{channel_names[c]}: width (upper-lower)')
