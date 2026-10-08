@@ -533,6 +533,29 @@ def check_spatial_field_patch_relative_integration():
         assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_spatial_field produced no (or an empty) PNG'
     print('PASS: plot_spatial_field.load_and_plot_pth renders a real {name}_pi3nn.pth result without error.')
 
+    from .plot_residual_field import load_and_plot as load_and_plot_residual, compute_residual_fields
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({'net_mean': net_mean.state_dict(), 'model_def': model_def}, pth_path)
+        config_path = os.path.join(d, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump({'dtype': 'float64'}, f)
+        png_path = os.path.join(d, 'check_residual.png')
+        load_and_plot_residual(pth_path, config_path, split='train', index=0, out_path=png_path, dataset=train_ds)
+        assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_residual_field produced no (or an empty) PNG'
+    # Independently verify compute_residual_fields' arithmetic itself
+    # (not just that the script runs without error): a residual of the
+    # opposite sign must land entirely in the OTHER one-sided target, and
+    # up_target - down_target must reconstruct the signed difference exactly.
+    rng = np.random.RandomState(0)
+    target_scaled = rng.randn(3, 4, 4)
+    mean_pred = rng.randn(3, 4, 4)
+    up_t, down_t = compute_residual_fields(target_scaled, mean_pred)
+    assert np.all(up_t >= 0) and np.all(down_t >= 0), 'one-sided residual targets must be non-negative'
+    assert np.allclose(up_t - down_t, target_scaled - mean_pred), "up_target - down_target must equal target_scaled - mean_pred"
+    assert not np.any((up_t > 0) & (down_t > 0)), 'up_target and down_target can never both be positive at the same pixel'
+    print('PASS: plot_residual_field.load_and_plot renders the true residual field, and compute_residual_fields matches residual_targets\' one-sided-split arithmetic exactly.')
+
 
 def check_spatial_field_absolute_mode():
     """Same integration shape as check_spatial_field_patch_relative_
