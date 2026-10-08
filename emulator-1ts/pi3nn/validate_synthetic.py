@@ -49,6 +49,7 @@ import tempfile
 import numpy as np
 import torch
 import torch.distributed as dist
+import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 
@@ -214,6 +215,7 @@ def run_full():
     )
     print('PASS: per-channel PICP on the training set matches the target quantile.')
 
+    check_compute_bounds_broadcasting()
     check_dct_smooth_rank1_is_spatial_mean()
     check_spatial_field_vectorized_matches_loop_reference()
     check_spatial_field_recovers_smooth_pattern()
@@ -221,6 +223,43 @@ def run_full():
     check_spatial_field_patch_relative_integration()
     check_spatial_field_absolute_mode()
     print('PASS: full pipeline sanity checks.')
+
+
+def check_compute_bounds_broadcasting():
+    """plot_prediction.compute_bounds must handle both calibration_mode
+    outputs: a scalar c_up/c_down (one constant per channel, shape
+    (C,)) and a spatial field (one value per cell, shape (C, H, W)).
+    Checked directly against a hand-computed reference rather than just
+    'does it run', since silent incorrect broadcasting (e.g. a scalar
+    accidentally broadcasting against the wrong axis) would be easy to
+    get wrong and hard to notice visually in a rendered plot."""
+    from .plot_prediction import compute_bounds
+    rng = np.random.RandomState(0)
+    C, H, W = 3, 4, 5
+    mean_pred = rng.randn(C, H, W)
+    up_pred = np.abs(rng.randn(C, H, W)) + 0.1
+    down_pred = np.abs(rng.randn(C, H, W)) + 0.1
+
+    c_up_scalar = np.array([1.0, 2.0, 3.0])
+    c_down_scalar = np.array([0.5, 1.5, 2.5])
+    upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up_scalar, c_down_scalar)
+    for c in range(C):
+        expected_upper = mean_pred[c] + c_up_scalar[c] * up_pred[c]
+        expected_lower = mean_pred[c] - c_down_scalar[c] * down_pred[c]
+        assert np.allclose(upper[c], expected_upper), f'scalar mode: upper mismatch on channel {c}'
+        assert np.allclose(lower[c], expected_lower), f'scalar mode: lower mismatch on channel {c}'
+    assert np.allclose(width, upper - lower)
+    print('PASS: compute_bounds broadcasts a per-channel scalar c_up/c_down correctly.')
+
+    c_up_field = rng.rand(C, H, W) + 0.5
+    c_down_field = rng.rand(C, H, W) + 0.5
+    upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up_field, c_down_field)
+    expected_upper = mean_pred + c_up_field * up_pred
+    expected_lower = mean_pred - c_down_field * down_pred
+    assert np.allclose(upper, expected_upper), 'field mode: upper mismatch'
+    assert np.allclose(lower, expected_lower), 'field mode: lower mismatch'
+    assert np.allclose(width, upper - lower)
+    print('PASS: compute_bounds broadcasts a per-cell field c_up/c_down correctly.')
 
 
 def check_dct_smooth_rank1_is_spatial_mean():
@@ -425,6 +464,21 @@ def check_spatial_field_patch_relative_integration():
     assert 'train' in results and 'valid' in results
     _assert_spatial_picp_stats_sane(results, out_channels, (patch, patch))
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'patch_relative' mode.")
+
+    from .plot_prediction import load_and_plot as load_and_plot_prediction
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({
+            'net_mean': net_mean.state_dict(), 'net_up': net_up.state_dict(), 'net_down': net_down.state_dict(),
+            'model_def': model_def, 'c_up_field': trainer.c_up_field, 'c_down_field': trainer.c_down_field,
+        }, pth_path)
+        config_path = os.path.join(d, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump({'dtype': 'float64'}, f)
+        png_path = os.path.join(d, 'check_prediction.png')
+        load_and_plot_prediction(pth_path, config_path, split='train', index=0, out_path=png_path, dataset=train_ds)
+        assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_prediction produced no (or an empty) PNG'
+    print('PASS: plot_prediction.load_and_plot renders mean/bounds for a real sample without error.')
 
     from .plot_spatial_field import load_and_plot_pth
     with tempfile.TemporaryDirectory() as d:

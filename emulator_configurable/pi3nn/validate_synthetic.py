@@ -312,6 +312,43 @@ def check_run_pi3nn_phase_registers_updown():
     print('PASS: importing run_pi3nn_phase alone registers PI3NNUpDownModule (no hidden import-order dependency).')
 
 
+def check_compute_bounds_broadcasting():
+    """plot_prediction.compute_bounds must handle both calibration_mode
+    outputs: a scalar c_up/c_down (one constant per channel, shape
+    (C,)) and a spatial field (one value per cell, shape (C, H, W)).
+    Checked directly against a hand-computed reference rather than just
+    'does it run', since silent incorrect broadcasting (e.g. a scalar
+    accidentally broadcasting against the wrong axis) would be easy to
+    get wrong and hard to notice visually in a rendered plot."""
+    from .plot_prediction import compute_bounds
+    rng = np.random.RandomState(0)
+    C, H, W = 3, 4, 5
+    mean_pred = rng.randn(C, H, W)
+    up_pred = np.abs(rng.randn(C, H, W)) + 0.1
+    down_pred = np.abs(rng.randn(C, H, W)) + 0.1
+
+    c_up_scalar = np.array([1.0, 2.0, 3.0])
+    c_down_scalar = np.array([0.5, 1.5, 2.5])
+    upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up_scalar, c_down_scalar)
+    for c in range(C):
+        expected_upper = mean_pred[c] + c_up_scalar[c] * up_pred[c]
+        expected_lower = mean_pred[c] - c_down_scalar[c] * down_pred[c]
+        assert np.allclose(upper[c], expected_upper), f'scalar mode: upper mismatch on channel {c}'
+        assert np.allclose(lower[c], expected_lower), f'scalar mode: lower mismatch on channel {c}'
+    assert np.allclose(width, upper - lower)
+    print('PASS: compute_bounds broadcasts a per-channel scalar c_up/c_down correctly.')
+
+    c_up_field = rng.rand(C, H, W) + 0.5
+    c_down_field = rng.rand(C, H, W) + 0.5
+    upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up_field, c_down_field)
+    expected_upper = mean_pred + c_up_field * up_pred
+    expected_lower = mean_pred - c_down_field * down_pred
+    assert np.allclose(upper, expected_upper), 'field mode: upper mismatch'
+    assert np.allclose(lower, expected_lower), 'field mode: lower mismatch'
+    assert np.allclose(width, upper - lower)
+    print('PASS: compute_bounds broadcasts a per-cell field c_up/c_down correctly.')
+
+
 def check_dct_smooth_rank1_is_spatial_mean():
     """rank=1 keeps only the DC coefficient -- algebraically this must
     collapse the field to its own flat spatial mean everywhere (the
@@ -510,7 +547,18 @@ def check_spatial_field_patch_relative_integration():
         png_path = f'{logdir}/check.png'
         load_and_plot_json(json_path, out_path=png_path, quantile=0.9)
         assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, 'plot_spatial_field produced no (or an empty) PNG'
-    print('PASS: plot_spatial_field.load_and_plot_json renders a real calibrate_spatial_field() JSON result without error.')
+        print('PASS: plot_spatial_field.load_and_plot_json renders a real calibrate_spatial_field() JSON result without error.')
+
+        from .plot_prediction import load_and_plot as load_and_plot_prediction
+        pred_png_path = f'{logdir}/check_prediction.png'
+        load_and_plot_prediction(
+            config={'mean_model_config': mean_config, 'updown_model_config': {up_down_mode: updown_config}},
+            mean_ckpt_path=mean_ckpt, up_ckpt_path=role_ckpts['up'], down_ckpt_path=role_ckpts['down'],
+            up_down_mode=up_down_mode, calibration_json_path=json_path,
+            index=0, timestep=-1, out_path=pred_png_path, train_dataset=train_ds,
+        )
+        assert os.path.exists(pred_png_path) and os.path.getsize(pred_png_path) > 0, 'plot_prediction produced no (or an empty) PNG'
+    print('PASS: plot_prediction.load_and_plot renders mean/bounds for a real sample without error.')
 
 
 def check_spatial_field_absolute_mode():
@@ -582,6 +630,7 @@ def run_full():
     check_recurrent_clone_positivity()
     check_full_sequence()
     check_run_pi3nn_phase_registers_updown()
+    check_compute_bounds_broadcasting()
     check_dct_smooth_rank1_is_spatial_mean()
     check_spatial_field_vectorized_matches_loop_reference()
     check_spatial_field_recovers_smooth_pattern()
