@@ -341,6 +341,27 @@ class PI3NNConvTrainer:
                 cell_hw = np.broadcast_to((local_h * patch_w + local_w)[None, :, :], (n_sample, patch_h, patch_w)).astype(np.int64)
             cell_index = cell_hw.reshape(-1)
 
+            # Coverage diagnostic: which cells actually received at least one
+            # data point. Same cell_index regardless of channel, so this is
+            # computed once here rather than per-channel below. Added
+            # specifically to confirm/deny a real hypothesis (not just
+            # idle curiosity): 'absolute' mode's domain may not tile evenly
+            # under xbatcher's fixed-stride placement with return_partial=
+            # False, leaving a structural edge band permanently uncovered
+            # regardless of how much data is pulled -- unlike a sample-size
+            # problem, more data does not fix this.
+            populated = np.bincount(cell_index, minlength=n_cells) > 0
+            populated_frac = float(populated.mean())
+            print(f"[spatial_field] coords_mode={coords_mode!r}: {populated.sum()}/{n_cells} cells populated ({populated_frac:.1%})")
+            if populated_frac < 1.0:
+                populated_2d = populated.reshape(field_h, field_w)
+                covered_rows = np.where(populated_2d.any(axis=1))[0]
+                covered_cols = np.where(populated_2d.any(axis=0))[0]
+                print(
+                    f"[spatial_field] covered row range: {covered_rows.min()}-{covered_rows.max()} (of 0-{field_h - 1}), "
+                    f"covered col range: {covered_cols.min()}-{covered_cols.max()} (of 0-{field_w - 1})"
+                )
+
             quantile = self.configs['quantile']
             for c in range(out_channels):
                 y_c = y_t[:, c].numpy().reshape(-1)
