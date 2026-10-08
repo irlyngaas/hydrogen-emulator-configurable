@@ -137,6 +137,14 @@ def train(
     # own docstring flagged before any real data existed.
     bias_init = pi3nn_configs.get('bias_init', 3.0)
     eps = pi3nn_configs.get('eps', 0.2)
+    # Direct confirmation that the config value actually reached here --
+    # up_pred/down_pred's floor has been observed stuck at sqrt(0.2) even
+    # with eps:0.00001 set in the yaml, so printing the value immediately
+    # before it's passed into build_networks settles whether the config
+    # read itself is the problem, rather than inferring it indirectly from
+    # the trained network's floor behavior several steps downstream.
+    if is_main_process():
+        print(f'[main_pi3nn.train] bias_init={bias_init!r}, eps={eps!r} (from pi3nn_configs.get, floor=sqrt(eps)={eps**0.5:.4g})')
     net_mean, net_up, net_down = build_networks(model_def, bias_init=bias_init, eps=eps)
     net_mean = net_mean.to(device).to(dtype)
     net_up = net_up.to(device).to(dtype)
