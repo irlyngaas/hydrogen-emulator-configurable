@@ -125,7 +125,19 @@ def train(
     if scaler_yaml is not None:
         model_def['scalers'] = create_scalers_from_yaml(scaler_yaml)
 
-    net_mean, net_up, net_down = build_networks(model_def)
+    # bias_init/eps control PositiveResNetWrapper's positivity-enforcing
+    # activation (net_up/net_down only -- net_mean is unaffected and can be
+    # reused across different eps values without retraining). Previously
+    # hardcoded at build_networks' defaults; exposed here since eps=0.2's
+    # floor (sqrt(0.2)~=0.447) turned out to be far larger than real CONUS1
+    # residual scales given how well net_mean fits, causing net_up/net_down
+    # to saturate at that floor almost everywhere (confirmed directly via
+    # plot_prediction's raw-output logging) -- exactly the "worth a sanity
+    # check against real CONUS1 residual magnitudes" PositiveResNetWrapper's
+    # own docstring flagged before any real data existed.
+    bias_init = pi3nn_configs.get('bias_init', 3.0)
+    eps = pi3nn_configs.get('eps', 0.2)
+    net_mean, net_up, net_down = build_networks(model_def, bias_init=bias_init, eps=eps)
     net_mean = net_mean.to(device).to(dtype)
     net_up = net_up.to(device).to(dtype)
     net_down = net_down.to(device).to(dtype)

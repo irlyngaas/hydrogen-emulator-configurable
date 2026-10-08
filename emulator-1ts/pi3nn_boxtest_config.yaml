@@ -29,6 +29,13 @@ pi3nn_configs:
   quantile: 0.95
   calibration_mode: spatial_field
   spatial_field_rank: 3
+  bias_init: 3.0  # PositiveResNetWrapper's learnable per-channel bias init (net_up/net_down only)
+  eps: 0.2        # activation floor = sqrt(eps) -- 0.2 (floor ~0.447) was tuned for roughly-unit-
+                   # variance residuals; real CONUS1 residuals are far smaller given how well
+                   # net_mean fits, so net_up/net_down saturate at this floor almost everywhere
+                   # (confirmed via plot_prediction's raw-output logging). Try something like
+                   # 1e-4 to 1e-6 (floor ~0.01 to ~0.001) -- net_mean is unaffected by this value
+                   # and its checkpoint can be reused across different eps values without retraining.
   max_epochs:        # small -- this is a smoke test on real data/shapes, not a real training run yet
     mean: 5
     up: 5
