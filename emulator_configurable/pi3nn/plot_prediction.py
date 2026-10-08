@@ -165,6 +165,17 @@ def load_and_plot(
     up_pred_np = pred_up[0, t].numpy()
     down_pred_np = pred_down[0, t].numpy()
 
+    # Diagnostic: is a flat-looking offset panel a plotting artifact, or
+    # does the RAW network output genuinely have near-zero spatial
+    # variance for this channel/sample? (std here, not the calibrated
+    # offset, isolates net_up/net_down's own behavior from c_up_field's.)
+    for c in range(up_pred_np.shape[0]):
+        print(
+            f'[plot_prediction] channel {c}: up_pred range [{up_pred_np[c].min():.4g}, {up_pred_np[c].max():.4g}] '
+            f'(std {up_pred_np[c].std():.4g}), down_pred range [{down_pred_np[c].min():.4g}, {down_pred_np[c].max():.4g}] '
+            f'(std {down_pred_np[c].std():.4g})'
+        )
+
     out_channel = mean_pred_np.shape[0]
     c_up, c_down = load_calibration_constants(calibration_json_path, out_channel)
     upper, lower, width = compute_bounds(mean_pred_np, up_pred_np, down_pred_np, c_up, c_down)
