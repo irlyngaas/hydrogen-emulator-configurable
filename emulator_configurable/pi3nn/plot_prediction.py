@@ -178,6 +178,14 @@ def load_and_plot(
 
     out_channel = mean_pred_np.shape[0]
     c_up, c_down = load_calibration_constants(calibration_json_path, out_channel)
+
+    # Diagnostic: is the calibration CONSTANT itself unexpectedly large,
+    # or is the offset inflation coming from somewhere else (e.g. a stale
+    # checkpoint, a units mismatch)? Printed per-channel so it can be
+    # directly compared against the training run's own reported mpiw.
+    for c in range(out_channel):
+        print(f'[plot_prediction] channel {c}: c_up_field range [{c_up[c].min():.4g}, {c_up[c].max():.4g}], '
+              f'c_down_field range [{c_down[c].min():.4g}, {c_down[c].max():.4g}]')
     upper, lower, width = compute_bounds(mean_pred_np, up_pred_np, down_pred_np, c_up, c_down)
 
     out_path = out_path or calibration_json_path.rsplit('.json', 1)[0] + f'_idx{index}_t{t}_prediction.png'

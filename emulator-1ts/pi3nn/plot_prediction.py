@@ -175,6 +175,14 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
         c_up = save_dict['c_up'].numpy()
         c_down = save_dict['c_down'].numpy()
 
+    # Diagnostic: is the calibration CONSTANT itself unexpectedly large,
+    # or is the offset inflation coming from somewhere else (e.g. a stale
+    # checkpoint, a units mismatch)? Printed per-channel so it can be
+    # directly compared against the training run's own reported mpiw.
+    for c in range(c_up.shape[0]):
+        print(f'[plot_prediction] channel {c}: c_up_field range [{c_up[c].min():.4g}, {c_up[c].max():.4g}], '
+              f'c_down_field range [{c_down[c].min():.4g}, {c_down[c].max():.4g}]')
+
     upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up, c_down)
     channel_names = model_def.get('pressure_names')
     out_path = out_path or pth_path.rsplit('.pth', 1)[0] + f'_{split}_idx{index}_prediction.png'
