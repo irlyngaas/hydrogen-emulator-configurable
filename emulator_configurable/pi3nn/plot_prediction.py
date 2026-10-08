@@ -90,7 +90,13 @@ def plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_nam
 
         down_offset = mean_pred[c] - lower[c]   # >= 0
         up_offset = upper[c] - mean_pred[c]     # >= 0
-        off_vmax = max(down_offset.max(), up_offset.max(), 1e-12)
+        # A single outlier pixel (plausibly a patch-edge artifact) can
+        # dominate a raw max() and wash out everywhere else's real, smaller-
+        # magnitude variation into a sliver of the colorbar near zero --
+        # same category of bug as the earlier picp_field colorbar issue.
+        # A robust (99th percentile) upper bound clips rare outliers instead
+        # of letting them set the scale for the whole field.
+        off_vmax = max(float(np.percentile(np.concatenate([down_offset.ravel(), up_offset.ravel()]), 99)), 1e-12)
         im_down = ax_down_off.imshow(down_offset, cmap='magma', vmin=0, vmax=off_vmax)
         ax_down_off.set_title(f'{channel_names[c]}: mean - lower (down offset)')
         fig.colorbar(im_down, ax=ax_down_off, fraction=0.046, pad=0.04)
