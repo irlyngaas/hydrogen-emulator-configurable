@@ -368,6 +368,15 @@ class PI3NNConvTrainer:
                 m_c = mean_t[:, c].numpy().reshape(-1)
                 u_c = up_t[:, c].numpy().reshape(-1)
                 d_c = down_t[:, c].numpy().reshape(-1)
+                # Diagnostic: is THIS (the array c_up_field is actually fit
+                # against) consistent with what plot_prediction finds later
+                # from a reloaded checkpoint? If up_t here is NOT
+                # floor-saturated the way a reloaded single-sample forward
+                # pass is, the fit and the later evaluation are seeing
+                # genuinely different data, not just the same thing viewed
+                # two ways.
+                print(f'[boundary_optimization_spatial_field] channel {c}: up_t range [{u_c.min():.4g}, {u_c.max():.4g}] '
+                      f'(mean {u_c.mean():.4g}), down_t range [{d_c.min():.4g}, {d_c.max():.4g}] (mean {d_c.mean():.4g})')
                 c_up_f, c_down_f, alpha_up, alpha_down = fit_spatial_field(
                     y_c, m_c, u_c, d_c, cell_index, n_cells, (field_h, field_w), quantile, rank,
                 )
@@ -476,6 +485,15 @@ class PI3NNConvTrainer:
         per_cell_inside_sum = torch.zeros(out_channels, n_cells, device=self.device)
         per_cell_count = torch.zeros(out_channels, n_cells, device=self.device)
 
+        # Diagnostic: is up_pred/down_pred HERE (evaluate time) consistent
+        # with what boundary_optimization_spatial_field's own up_t/down_t
+        # looked like at fit time? If these two disagree, the field was fit
+        # against different data than it's later evaluated against.
+        up_min = torch.full((out_channels,), float('inf'), device=self.device)
+        up_max = torch.full((out_channels,), float('-inf'), device=self.device)
+        down_min = torch.full((out_channels,), float('inf'), device=self.device)
+        down_max = torch.full((out_channels,), float('-inf'), device=self.device)
+
         with torch.no_grad():
             for batch in loader:
                 if coords_mode == 'absolute':
@@ -488,6 +506,12 @@ class PI3NNConvTrainer:
                 mean_pred = self.net_mean(state, evaptrans, params)
                 up_pred = self.net_up(state, evaptrans, params)
                 down_pred = self.net_down(state, evaptrans, params)
+
+                for c in range(out_channels):
+                    up_min[c] = torch.minimum(up_min[c], up_pred[:, c].min())
+                    up_max[c] = torch.maximum(up_max[c], up_pred[:, c].max())
+                    down_min[c] = torch.minimum(down_min[c], down_pred[:, c].min())
+                    down_max[c] = torch.maximum(down_max[c], down_pred[:, c].max())
 
                 batch_n, _, patch_h, patch_w = mean_pred.shape
                 local_h = np.arange(patch_h)[:, None]
@@ -529,6 +553,10 @@ class PI3NNConvTrainer:
                 combined_idx = (chan_idx_exp * n_cells + cell_idx_exp).reshape(-1)
                 per_cell_inside_sum.view(-1).scatter_add_(0, combined_idx, inside.reshape(-1).to(per_cell_inside_sum.dtype))
                 per_cell_count.view(-1).scatter_add_(0, combined_idx, torch.ones_like(inside.reshape(-1)).to(per_cell_count.dtype))
+
+        for c in range(out_channels):
+            print(f'[_caps_over_loader_spatial_field] channel {c}: up_pred range [{up_min[c].item():.4g}, {up_max[c].item():.4g}], '
+                  f'down_pred range [{down_min[c].item():.4g}, {down_max[c].item():.4g}] (this rank/loader only, not reduced)')
 
         if reduce_across_ranks and dist.is_initialized():
             for t in (sq_err_sum, inside_sum, width_sum, y_sum, y_sq_sum, count, per_cell_inside_sum, per_cell_count):
