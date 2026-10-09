@@ -697,6 +697,21 @@ def check_spatial_field_absolute_mode():
     _assert_spatial_picp_stats_sane(results, out_channels, (y_extent, x_extent))
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'absolute' coordinate mode, full-domain field.")
 
+    from .edge_vs_interior_picp import edge_interior_masks, load_and_summarize
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({'results': results, 'model_def': model_def}, pth_path)
+        load_and_summarize(pth_path, split='train', patch_size=patch, overlap=1)
+    # Directly checks the mask logic itself (not just that the script runs):
+    # a known 10x10 domain with band_width=3 should have a 4x4=16-cell
+    # interior, everything else (84 cells) edge.
+    edge_mask, interior_mask = edge_interior_masks(y_extent, x_extent, band_width=3)
+    assert interior_mask.sum() == 16 and edge_mask.sum() == 84, (
+        f'edge/interior mask sizes wrong for a 10x10 domain, band_width=3: '
+        f'interior={interior_mask.sum()}, edge={edge_mask.sum()} (expected 16, 84)'
+    )
+    print('PASS: edge_vs_interior_picp summarizes a real {name}_pi3nn.pth result and splits edge/interior cells correctly.')
+
 
 def get_distributed_info():
     """Inlined copy of main.py's get_distributed_info -- see
