@@ -111,10 +111,18 @@ def plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_nam
     print(f'Saved prediction+bounds plot to {out_path}')
 
 
-def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, dataset=None):
+def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, dataset=None, physical_units=True):
     """dataset: same dataset-injection seam calibrate()-style functions
     have elsewhere in this project, for validate_synthetic.py to run
-    this on in-memory tensors instead of real .pfb files."""
+    this on in-memory tensors instead of real .pfb files.
+
+    physical_units: unscale mean/upper/lower/width back to real pressure
+    units before plotting (default). Pass False to keep standardized
+    (z-score) units instead -- useful for cross-checking a plot directly
+    against this script's own printed up_pred/down_pred/c_up_field/
+    c_down_field diagnostics, or against training-log values like
+    train_mpiw, which are ALL still in standardized space regardless of
+    this flag (only the final plotted panels are affected)."""
     with open(config_path) as f:
         config = yaml.safe_load(f)
     save_dict = torch.load(pth_path, map_location='cpu')
@@ -194,20 +202,22 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
         print(f'[plot_prediction] channel {c}: c_up_field range [{c_up[c].min():.4g}, {c_up[c].max():.4g}], '
               f'c_down_field range [{c_down[c].min():.4g}, {c_down[c].max():.4g}]')
 
-    # Unscale to physical pressure units for plotting -- mean_pred is a
-    # point value (full affine unscale_pressure); up_pred/down_pred are
-    # magnitudes with no meaningful zero point, so they need the
-    # sigma-only unscale_pressure_width instead (see model.py's
-    # unscale_pressure_width docstring for the derivation -- using
-    # unscale_pressure on a magnitude would incorrectly shift it by the
-    # per-channel mean). Mutates the still-batched torch tensors, same
-    # convention as scale_pressure/scale_evaptrans/scale_statics above.
-    net_mean.unscale_pressure(mean_pred_t)
-    net_mean.unscale_pressure_width(up_pred_t)
-    net_mean.unscale_pressure_width(down_pred_t)
-    mean_pred = mean_pred_t[0].numpy()
-    up_pred = up_pred_t[0].numpy()
-    down_pred = down_pred_t[0].numpy()
+    if physical_units:
+        # Unscale to physical pressure units for plotting -- mean_pred is
+        # a point value (full affine unscale_pressure); up_pred/down_pred
+        # are magnitudes with no meaningful zero point, so they need the
+        # sigma-only unscale_pressure_width instead (see model.py's
+        # unscale_pressure_width docstring for the derivation -- using
+        # unscale_pressure on a magnitude would incorrectly shift it by
+        # the per-channel mean). Mutates the still-batched torch tensors,
+        # same convention as scale_pressure/scale_evaptrans/scale_statics
+        # above.
+        net_mean.unscale_pressure(mean_pred_t)
+        net_mean.unscale_pressure_width(up_pred_t)
+        net_mean.unscale_pressure_width(down_pred_t)
+        mean_pred = mean_pred_t[0].numpy()
+        up_pred = up_pred_t[0].numpy()
+        down_pred = down_pred_t[0].numpy()
 
     upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up, c_down)
     channel_names = model_def.get('pressure_names')
@@ -222,5 +232,9 @@ if __name__ == '__main__':
     parser.add_argument('--split', choices=['train', 'valid'], default='train')
     parser.add_argument('--index', type=int, default=0, help='Which sample in the split to plot')
     parser.add_argument('--out', default=None, help='Output PNG path (default: alongside --pth)')
+    parser.add_argument('--scaled', action='store_true',
+                         help='Plot in standardized (z-score) units instead of physical pressure units -- '
+                              'matches the units of this script\'s own printed diagnostics and training-log mpiw')
     args = parser.parse_args()
-    load_and_plot(args.pth, args.config, split=args.split, index=args.index, out_path=args.out)
+    load_and_plot(args.pth, args.config, split=args.split, index=args.index, out_path=args.out,
+                  physical_units=not args.scaled)
