@@ -160,13 +160,13 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
     net_mean.scale_statics(params)
 
     with torch.no_grad():
-        mean_pred = net_mean(state, evaptrans, params)
-        up_pred = net_up(state, evaptrans, params)
-        down_pred = net_down(state, evaptrans, params)
+        mean_pred_t = net_mean(state, evaptrans, params)
+        up_pred_t = net_up(state, evaptrans, params)
+        down_pred_t = net_down(state, evaptrans, params)
 
-    mean_pred = mean_pred[0].numpy()
-    up_pred = up_pred[0].numpy()
-    down_pred = down_pred[0].numpy()
+    mean_pred = mean_pred_t[0].numpy()
+    up_pred = up_pred_t[0].numpy()
+    down_pred = down_pred_t[0].numpy()
 
     # Diagnostic: is a flat-looking offset panel a plotting artifact, or
     # does the RAW network output genuinely have near-zero spatial
@@ -193,6 +193,21 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
     for c in range(c_up.shape[0]):
         print(f'[plot_prediction] channel {c}: c_up_field range [{c_up[c].min():.4g}, {c_up[c].max():.4g}], '
               f'c_down_field range [{c_down[c].min():.4g}, {c_down[c].max():.4g}]')
+
+    # Unscale to physical pressure units for plotting -- mean_pred is a
+    # point value (full affine unscale_pressure); up_pred/down_pred are
+    # magnitudes with no meaningful zero point, so they need the
+    # sigma-only unscale_pressure_width instead (see model.py's
+    # unscale_pressure_width docstring for the derivation -- using
+    # unscale_pressure on a magnitude would incorrectly shift it by the
+    # per-channel mean). Mutates the still-batched torch tensors, same
+    # convention as scale_pressure/scale_evaptrans/scale_statics above.
+    net_mean.unscale_pressure(mean_pred_t)
+    net_mean.unscale_pressure_width(up_pred_t)
+    net_mean.unscale_pressure_width(down_pred_t)
+    mean_pred = mean_pred_t[0].numpy()
+    up_pred = up_pred_t[0].numpy()
+    down_pred = down_pred_t[0].numpy()
 
     upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up, c_down)
     channel_names = model_def.get('pressure_names')

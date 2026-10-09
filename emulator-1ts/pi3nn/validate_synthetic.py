@@ -216,6 +216,7 @@ def run_full():
     print('PASS: per-channel PICP on the training set matches the target quantile.')
 
     check_compute_bounds_broadcasting()
+    check_unscale_pressure_width_is_sigma_only()
     check_dct_smooth_rank1_is_spatial_mean()
     check_dct_smooth_clips_negative_overshoot()
     check_bisection_handles_unreachable_quota_from_below()
@@ -262,6 +263,79 @@ def check_compute_bounds_broadcasting():
     assert np.allclose(lower, expected_lower), 'field mode: lower mismatch'
     assert np.allclose(width, upper - lower)
     print('PASS: compute_bounds broadcasts a per-cell field c_up/c_down correctly.')
+
+
+def check_unscale_pressure_width_is_sigma_only():
+    """unscale_pressure_width (added for plot_prediction.py's physical-
+    units reporting) must rescale a magnitude (net_up/net_down's output,
+    or any upper-lower difference derived from it) by sigma ONLY, never
+    adding mu the way the point-value unscale_pressure does -- a
+    magnitude has no meaningful zero point to shift. make_model_def()'s
+    own scalers are all (mu=0, sigma=1) -- a no-op that could never
+    catch this bug (mu=0 means adding it changes nothing) -- so this
+    builds its own model_def with a non-trivial, non-zero mu/sigma per
+    channel specifically to distinguish the two methods.
+
+    Also checks the algebraic identity this whole feature depends on:
+    unscaling mean_pred/up_pred/down_pred FIRST then computing bounds
+    must equal computing bounds in scaled space first then unscaling the
+    result via the full affine transform -- confirms compute_bounds'
+    linearity actually composes correctly with this scaling scheme, not
+    just that each piece works in isolation."""
+    from model import get_model
+    from .plot_prediction import compute_bounds
+
+    out_channels = 3
+    scalers = {f'press_diff_{i}': (10.0 + 5.0 * i, 2.0 + i) for i in range(out_channels)}
+    model_def = {
+        'in_channels': out_channels, 'out_channels': out_channels, 'hidden_dim': 4,
+        'kernel_size': 3, 'depth': 1, 'scalers': scalers,
+        'pressure_names': list(scalers.keys()), 'evaptrans_names': [], 'param_names': [],
+        'n_evaptrans': 0, 'parameter_list': None, 'param_nlayer': None,
+    }
+    net = get_model('resnet', model_def)
+
+    rng = np.random.RandomState(0)
+    H, W = 4, 5
+    mean_scaled = torch.from_numpy(rng.randn(1, out_channels, H, W))
+    up_scaled = torch.from_numpy(np.abs(rng.randn(1, out_channels, H, W)) + 0.1)
+    down_scaled = torch.from_numpy(np.abs(rng.randn(1, out_channels, H, W)) + 0.1)
+
+    for c in range(out_channels):
+        mu, sigma = scalers[f'press_diff_{c}']
+        assert mu != 0.0, 'test setup needs non-zero mu to actually distinguish the two unscale methods'
+
+    mean_physical = mean_scaled.clone()
+    up_physical = up_scaled.clone()
+    down_physical = down_scaled.clone()
+    net.unscale_pressure(mean_physical)
+    net.unscale_pressure_width(up_physical)
+    net.unscale_pressure_width(down_physical)
+
+    for c in range(out_channels):
+        mu, sigma = scalers[f'press_diff_{c}']
+        assert np.allclose(mean_physical[0, c].numpy(), mean_scaled[0, c].numpy() * sigma + mu), \
+            f'channel {c}: unscale_pressure should apply the full affine transform'
+        assert np.allclose(up_physical[0, c].numpy(), up_scaled[0, c].numpy() * sigma), \
+            f'channel {c}: unscale_pressure_width should multiply by sigma only, no +mu'
+        assert not np.allclose(up_physical[0, c].numpy(), up_scaled[0, c].numpy() * sigma + mu), \
+            f'channel {c}: unscale_pressure_width accidentally added mu -- a magnitude has no zero point to shift'
+
+    c_up = np.array([1.5, 2.0, 0.8])
+    c_down = np.array([1.2, 1.7, 0.9])
+    upper_scaled, lower_scaled, _ = compute_bounds(mean_scaled[0].numpy(), up_scaled[0].numpy(), down_scaled[0].numpy(), c_up, c_down)
+    upper_scaled_t = torch.from_numpy(upper_scaled).unsqueeze(0)
+    lower_scaled_t = torch.from_numpy(lower_scaled).unsqueeze(0)
+    net.unscale_pressure(upper_scaled_t)
+    net.unscale_pressure(lower_scaled_t)
+
+    upper_physical, lower_physical, _ = compute_bounds(mean_physical[0].numpy(), up_physical[0].numpy(), down_physical[0].numpy(), c_up, c_down)
+
+    assert np.allclose(upper_physical, upper_scaled_t[0].numpy(), atol=1e-6), \
+        'unscaling mean/up first then computing bounds should match computing bounds first then unscaling upper'
+    assert np.allclose(lower_physical, lower_scaled_t[0].numpy(), atol=1e-6), \
+        'unscaling mean/down first then computing bounds should match computing bounds first then unscaling lower'
+    print('PASS: unscale_pressure_width rescales by sigma only (not the full affine transform), and composes correctly with compute_bounds.')
 
 
 def check_dct_smooth_rank1_is_spatial_mean():

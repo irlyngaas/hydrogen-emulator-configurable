@@ -175,6 +175,25 @@ class ResNet(torch.nn.Module):
             x[:, i, :, :] = x[:, i, :, :] * sigma + mu
 
     @torch.jit.export
+    def unscale_pressure_width(self, x):
+        # For PI3NN's net_up/net_down outputs (and any upper-lower
+        # difference derived from them): these are MAGNITUDES, not point
+        # values -- they have no meaningful zero point to shift by mu, so
+        # only the sigma (scale) factor applies here, unlike
+        # unscale_pressure's full affine transform. Confirmed by direct
+        # derivation: upper_scaled = mean_scaled + c*up_scaled, so
+        # upper_physical = upper_scaled*sigma + mu
+        #   = (mean_scaled*sigma + mu) + c*(up_scaled*sigma)
+        #   = mean_physical + c*(up_scaled*sigma) -- the up_scaled*sigma
+        # term carries NO +mu. Calling unscale_pressure directly on a
+        # width/magnitude instead of this would incorrectly shift it by
+        # mu (e.g. a width of exactly 0 would wrongly become mu, not 0).
+        # Dims are (batch, z, y, x)
+        for i in range(x.shape[1]):
+            sigma = self.scalers[f'press_diff_{i}'][1]
+            x[:, i, :, :] = x[:, i, :, :] * sigma
+
+    @torch.jit.export
     def get_predicted_pressure(self, x):
         self.unscale_pressure(x)
         return x.squeeze()
