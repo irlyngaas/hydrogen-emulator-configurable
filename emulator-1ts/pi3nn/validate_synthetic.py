@@ -58,7 +58,7 @@ from .trainer import PI3NNConvTrainer
 from .losses import reduced_masked_mse_loss
 from .boundary_optimizer import BoundaryOptimizer
 from .spatial_calibration import (
-    _caps_field, _dct_smooth, _fit_raw_cell_field, _fit_raw_cell_field_loop,
+    _caps_field, _dct_smooth, _fit_raw_cell_field, _fit_raw_cell_field_loop, _vectorized_bisect,
 )
 
 
@@ -218,6 +218,7 @@ def run_full():
     check_compute_bounds_broadcasting()
     check_dct_smooth_rank1_is_spatial_mean()
     check_dct_smooth_clips_negative_overshoot()
+    check_bisection_handles_unreachable_quota_from_below()
     check_spatial_field_vectorized_matches_loop_reference()
     check_spatial_field_recovers_smooth_pattern()
     check_spatial_field_global_coverage_restored()
@@ -325,6 +326,43 @@ def check_dct_smooth_clips_negative_overshoot():
         '_dct_smooth\'s output should be exactly the unclipped reconstruction clipped to the raw field\'s minimum'
     )
     print('PASS: _dct_smooth clips negative DCT-overshoot back up to the raw field\'s own minimum (reproduced a real Frontier failure mode).')
+
+
+def check_bisection_handles_unreachable_quota_from_below():
+    """Real finding on real Frontier data: a severely under-sampled
+    'absolute'-mode cell whose natural exceedances were already below
+    its quota AT c=0 (the tightest possible bound) made BOTH
+    BoundaryOptimizer.optimize_up/optimize_down and the vectorized
+    _vectorized_bisect converge to a meaningless near-machine-epsilon
+    artifact (100000 / 2**max_iter =~ 9.33e-297) instead of the correct
+    answer, 0 -- the outside-count is non-increasing in c, so once it's
+    already <= quota at c=0, no larger c can do anything but make it
+    smaller still; the quota is simply unreachable from below, and the
+    narrowest bound already satisfying it IS c=0. This silently fed a
+    degenerate near-zero value into _dct_smooth's clip floor
+    (introduced to fix the SEPARATE negative-overshoot bug -- see
+    check_dct_smooth_clips_negative_overshoot), defeating its purpose:
+    a floor of 9.33e-297 is positive in name only.
+
+    Constructs exactly this scenario (y systematically far below mean,
+    so 'up' side exceedances are naturally zero against a quota of 8)
+    and checks both optimizer paths return exactly 0, not something
+    vanishingly close to it."""
+    rng = np.random.RandomState(0)
+    n = 300
+    y = rng.randn(n) * 0.01 - 5.0
+    mean = np.zeros(n)
+    up = np.full(n, 0.01)
+
+    opt = BoundaryOptimizer(y, mean, up, up, num_outlier=8, c_up0_ini=0.0, c_up1_ini=100000.0, max_iter=1000)
+    c_up_scalar = opt.optimize_up(verbose=0)
+    assert c_up_scalar == 0.0, f'BoundaryOptimizer.optimize_up should return exactly 0.0 for an unreachable-from-below quota, got {c_up_scalar!r}'
+
+    cell_index = np.zeros(n, dtype=np.int64)
+    c_up_vec = _vectorized_bisect(y, mean, up, cell_index, 1, np.array([8.0]), np.array([True]), side='up')
+    assert c_up_vec[0] == 0.0, f'_vectorized_bisect should return exactly 0.0 for an unreachable-from-below quota, got {c_up_vec[0]!r}'
+
+    print('PASS: both BoundaryOptimizer.optimize_up and _vectorized_bisect return exactly 0 (not a near-machine-epsilon artifact) for an unreachable-from-below quota.')
 
 
 def check_spatial_field_vectorized_matches_loop_reference():

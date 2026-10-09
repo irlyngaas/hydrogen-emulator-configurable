@@ -64,8 +64,24 @@ def _vectorized_bisect(y, mean, output, cell_index, n_cells, num_outlier_per_cel
     c1 = np.full(n_cells, 100000.0)
     f0 = count(c0) - num_outlier_per_cell
     f1 = count(c1) - num_outlier_per_cell
-    c2 = c1.copy()
-    active = populated & (f0 != 0) & (f1 != 0)
+    # f0 <= 0 means the quota is already met or UNDERSHOT at the
+    # tightest possible bound (c=0) -- count(c) is non-increasing in c,
+    # so no c > 0 can ever produce MORE outside points than count(0)
+    # already has, making the quota unreachable from below. The correct
+    # answer is c=0 itself (the narrowest bound already satisfying "at
+    # most quota outside"), not running the loop below: unhandled, that
+    # either returns the wrong pre-loop default (c2 initialized to
+    # c1=100000, since f0==0 exactly makes the cell inactive from
+    # iteration 0 without c2 ever being set to 0) or, if f0 < 0, drives
+    # c1 toward 0 for max_iter iterations without ever finding an f2==0
+    # to stop at, converging to a meaningless near-machine-epsilon
+    # artifact (100000 / 2**max_iter) instead of the real answer, 0 --
+    # confirmed on real Frontier data (a severely under-sampled
+    # 'absolute'-mode cell whose natural 'up' exceedances were already
+    # zero, below an 8-point quota, at c=0).
+    unreachable_from_below = populated & (f0 <= 0)
+    c2 = np.where(unreachable_from_below, 0.0, c1)
+    active = populated & ~unreachable_from_below & (f1 != 0)
     for _ in range(max_iter):
         if not active.any():
             break

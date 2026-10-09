@@ -54,6 +54,23 @@ class BoundaryOptimizer:
         f0 = np.count_nonzero(self.y_train >= self.output_mean + c_up0 * self.output_up) - self.num_outlier
         f1 = np.count_nonzero(self.y_train >= self.output_mean + c_up1 * self.output_up) - self.num_outlier
 
+        # f0 <= 0 means the quota is already met or undershot at the
+        # tightest possible bound (c_up0) -- the outside-count is non-
+        # increasing in c, so no larger c can ever produce MORE outside
+        # points than count(c_up0) already has, making the quota
+        # unreachable from below. Correct answer: c_up0 itself (the
+        # narrowest bound already satisfying "at most quota outside"),
+        # not the loop below -- unhandled, this either returns the wrong
+        # pre-loop default (c_up2 initialized to c_up1, since f0==0
+        # exactly skips the loop entirely) or runs max_iter iterations
+        # converging to a meaningless near-machine-epsilon artifact
+        # instead (same bug found and fixed first in
+        # spatial_calibration.py's _vectorized_bisect on real data: a
+        # severely under-sampled cell whose natural exceedances were
+        # already below quota at c=0).
+        if f0 <= 0:
+            return c_up0
+
         c_up2 = c_up1
         it = 0
         while it <= self.max_iter and f0 != 0 and f1 != 0:
@@ -79,6 +96,11 @@ class BoundaryOptimizer:
         c_down1 = self.c_down1_ini
         f0 = np.count_nonzero(self.y_train <= self.output_mean - c_down0 * self.output_down) - self.num_outlier
         f1 = np.count_nonzero(self.y_train <= self.output_mean - c_down1 * self.output_down) - self.num_outlier
+
+        # Same unreachable-from-below case as optimize_up -- see its
+        # comment for the full explanation.
+        if f0 <= 0:
+            return c_down0
 
         c_down2 = c_down1
         it = 0
