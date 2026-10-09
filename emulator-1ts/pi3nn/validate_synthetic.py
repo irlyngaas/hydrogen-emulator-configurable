@@ -217,6 +217,7 @@ def run_full():
 
     check_compute_bounds_broadcasting()
     check_dct_smooth_rank1_is_spatial_mean()
+    check_dct_smooth_clips_negative_overshoot()
     check_spatial_field_vectorized_matches_loop_reference()
     check_spatial_field_recovers_smooth_pattern()
     check_spatial_field_global_coverage_restored()
@@ -273,6 +274,57 @@ def check_dct_smooth_rank1_is_spatial_mean():
     smoothed = _dct_smooth(field, 1)
     assert np.allclose(smoothed, field.mean(), atol=1e-8), 'rank=1 DCT smoothing should collapse to the spatial mean'
     print('PASS: spatial-field rank=1 collapses to the field\'s own spatial mean (scalar-baseline equivalent).')
+
+
+def check_dct_smooth_clips_negative_overshoot():
+    """Real finding on real Frontier data: a genuinely under-sampled
+    'absolute'-mode raw per-cell field (e.g. one broad geographic region
+    dominated by a different residual regime than its neighbor -- the
+    seasonal-bias finding elsewhere in this project means this is a real
+    scenario, not a hypothetical) can make rank=3 DCT reconstruction
+    overshoot NEGATIVE even though every raw cell is >= 0 by
+    construction -- confirmed on a real run (smoothed field as low as
+    -452), which broke BoundaryOptimizer's required positivity/
+    monotonicity for the stage-3 global rescale (alpha pinned at its
+    100000.0 search ceiling, train_picp collapsed to 0.47-0.80 instead of
+    the 0.95 target).
+
+    A sharp two-region 'step' field (one broad region near-floor, the
+    adjacent region two orders of magnitude larger -- the realistic
+    shape, unlike isolated-pixel noise or pure-high-frequency
+    checkerboard patterns, which this project tried first and which do
+    NOT reproduce the overshoot at rank=3, since their energy sits
+    entirely outside what a low-rank basis keeps) reproduces it exactly:
+    confirmed below that the UNCLIPPED reconstruction (computed
+    independently here, not via the production function, since
+    _dct_smooth now always clips) genuinely goes negative, so this test
+    is checking a real failure mode, not a tautology."""
+    from scipy.fft import dctn, idctn
+
+    H, W = 64, 64
+    rank = 3
+    field = np.full((H, W), 0.5)
+    field[:, W // 2:] = 500.0
+
+    coeffs = dctn(field, norm='ortho')
+    mask = np.zeros_like(coeffs, dtype=bool)
+    mask[:rank, :rank] = True
+    coeffs = np.where(mask, coeffs, 0.0)
+    unclipped = idctn(coeffs, norm='ortho')
+    assert unclipped.min() < 0, (
+        f'test setup is not actually exercising the overshoot -- unclipped reconstruction min '
+        f'{unclipped.min():.4g} should be negative to prove this check is meaningful'
+    )
+
+    smoothed = _dct_smooth(field, rank)
+    assert smoothed.min() >= field.min(), (
+        f'_dct_smooth should clip back up to at least the raw field\'s own minimum '
+        f'({field.min()}), got min {smoothed.min():.4g}'
+    )
+    assert np.allclose(smoothed, np.clip(unclipped, field.min(), None)), (
+        '_dct_smooth\'s output should be exactly the unclipped reconstruction clipped to the raw field\'s minimum'
+    )
+    print('PASS: _dct_smooth clips negative DCT-overshoot back up to the raw field\'s own minimum (reproduced a real Frontier failure mode).')
 
 
 def check_spatial_field_vectorized_matches_loop_reference():

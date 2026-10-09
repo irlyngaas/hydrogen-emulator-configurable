@@ -141,7 +141,26 @@ def _dct_smooth(field, rank):
     weighted fit; fine for the moderate gaps boxtest-scale overlap
     produces, worth revisiting (e.g. a weighted least-squares fit) if
     'absolute' mode is ever run on a domain large enough to have
-    genuinely sparse corners."""
+    genuinely sparse corners.
+
+    The reconstruction can dip below `field`'s own range even though
+    every raw value is >= 0 (BoundaryOptimizer's own search starts at
+    c=0) -- projecting onto a TRUNCATED basis is a weighted sum of
+    oscillating basis functions, and can overshoot below zero near any
+    region of sharp local variation (the same mechanism as Gibbs ringing
+    in a truncated Fourier series). Confirmed on real, noisy, under-
+    sampled 'absolute'-mode data (reconstructed field as low as -452
+    despite every raw cell being >= 0), which broke the strict
+    positivity/monotonicity fit_spatial_field's stage-3 global
+    BoundaryOptimizer call requires downstream -- not a corner case,
+    reproduced on every real under-sampled run so far. Clipped back up
+    to the smallest value actually OBSERVED in this channel's own raw
+    field (not an arbitrary small constant) -- grounded in this
+    channel's real data/scale rather than a magic number, and this is
+    only restoring the positivity precondition, not asserting the
+    clipped cells are well-calibrated: stage 3's global rescale is what
+    picks the right absolute scale afterward, this just has to hand it
+    something strictly positive to work with."""
     valid = ~np.isnan(field)
     fill_value = np.nanmean(field) if valid.any() else 0.0
     filled = np.where(valid, field, fill_value)
@@ -151,7 +170,9 @@ def _dct_smooth(field, rank):
     mask = np.zeros_like(coeffs, dtype=bool)
     mask[:rank_h, :rank_w] = True
     coeffs = np.where(mask, coeffs, 0.0)
-    return idctn(coeffs, norm='ortho')
+    smoothed = idctn(coeffs, norm='ortho')
+    floor = np.nanmin(field[valid]) if valid.any() else 0.0
+    return np.clip(smoothed, floor, None)
 
 
 def _caps_field(y, mean, up, down, c_up_per_point, c_down_per_point):
