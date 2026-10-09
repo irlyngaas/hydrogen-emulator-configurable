@@ -148,6 +148,18 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
     net_up = net_up.to(dtype).eval()
     net_down = net_down.to(dtype).eval()
 
+    # 'absolute'-mode c_up_field/c_down_field are sized to the WHOLE
+    # domain (Y_EXTENT, X_EXTENT), not a single patch -- plotting one
+    # sample needs that sample's real (y_min, x_min) position to slice
+    # out the matching patch_size x patch_size sub-window below, same
+    # return_coords plumbing boundary_optimization_spatial_field's
+    # absolute-mode coords loader already uses. Previously unhandled
+    # here entirely (this script was only ever exercised against
+    # 'patch_relative'-shaped fields, where no slicing is needed since
+    # the field is already patch-sized) -- confirmed broken on a real
+    # absolute-mode checkpoint (ValueError broadcasting (5,64,64)
+    # against (5,16,16)).
+    absolute_mode = save_dict.get('spatial_field_coords') == 'absolute'
     if dataset is not None:
         ds = dataset
     else:
@@ -159,9 +171,15 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
         data_def = dict(config['data_def'])
         data_def.pop('scaler_yaml', None)
         valid_fraction = config.get('valid_fraction', 0.1)
-        ds = ParFlowDataset(**data_def, dtype=dtype, valid_fraction=valid_fraction, split=split)
+        ds = ParFlowDataset(**data_def, dtype=dtype, valid_fraction=valid_fraction, split=split, return_coords=absolute_mode)
 
-    state, evaptrans, params, target = ds[index]
+    if absolute_mode:
+        state, evaptrans, params, target, coords = ds[index]
+        y_min, x_min = coords.tolist()
+    else:
+        state, evaptrans, params, target = ds[index]
+        y_min = x_min = None
+    patch_size = ds.patch_size
     state, evaptrans, params, target = (t.unsqueeze(0) for t in (state, evaptrans, params, target))
     net_mean.scale_pressure(state)
     net_mean.scale_evaptrans(evaptrans)
@@ -190,6 +208,12 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
     if 'c_up_field' in save_dict:
         c_up = save_dict['c_up_field'].numpy()
         c_down = save_dict['c_down_field'].numpy()
+        if absolute_mode:
+            print(f'[plot_prediction] --index {index} (split={split!r}) is at domain position '
+                  f'y={y_min}:{y_min + patch_size}, x={x_min}:{x_min + patch_size} -- slicing the '
+                  f'full-domain c_up_field/c_down_field to this window before broadcasting')
+            c_up = c_up[:, y_min:y_min + patch_size, x_min:x_min + patch_size]
+            c_down = c_down[:, y_min:y_min + patch_size, x_min:x_min + patch_size]
     else:
         c_up = save_dict['c_up'].numpy()
         c_down = save_dict['c_down'].numpy()

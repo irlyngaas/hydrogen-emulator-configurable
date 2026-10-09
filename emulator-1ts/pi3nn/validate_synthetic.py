@@ -771,6 +771,40 @@ def check_spatial_field_absolute_mode():
     _assert_spatial_picp_stats_sane(results, out_channels, (y_extent, x_extent))
     print("PASS: boundary_optimization_spatial_field/evaluate_spatial_field run end-to-end in 'absolute' coordinate mode, full-domain field.")
 
+    from .plot_prediction import load_and_plot as load_and_plot_prediction
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({
+            'net_mean': net_mean.state_dict(), 'net_up': net_up.state_dict(), 'net_down': net_down.state_dict(),
+            'model_def': model_def, 'c_up_field': trainer.c_up_field, 'c_down_field': trainer.c_down_field,
+            'spatial_field_coords': 'absolute',
+        }, pth_path)
+        config_path = os.path.join(d, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump({'dtype': 'float64'}, f)
+        png_path = os.path.join(d, 'check_absolute_prediction.png')
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            load_and_plot_prediction(pth_path, config_path, split='train', index=0, out_path=png_path, dataset=train_coord_ds)
+        output = captured.getvalue()
+        assert os.path.exists(png_path) and os.path.getsize(png_path) > 0, "plot_prediction produced no (or an empty) PNG for 'absolute' mode"
+        # Real bug this reproduces: c_up_field/c_down_field are sized to
+        # the WHOLE domain in 'absolute' mode, not a single patch --
+        # plot_prediction previously used the full-domain field directly
+        # against a patch-sized prediction (ValueError: could not
+        # broadcast (out_channels, Y_EXTENT, X_EXTENT) against
+        # (out_channels, patch, patch) on a real checkpoint). Not just
+        # "did it crash" -- cross-checks the printed slice position
+        # against this exact sample's own known coords.
+        y_min_expected, x_min_expected = train_coord_ds.coords[0].tolist()
+        assert f'y={y_min_expected}:{y_min_expected + patch}' in output and f'x={x_min_expected}:{x_min_expected + patch}' in output, (
+            f'plot_prediction did not report slicing at the expected domain position '
+            f'y={y_min_expected}, x={x_min_expected} -- got:\n{output}'
+        )
+    print("PASS: plot_prediction.load_and_plot correctly slices a full-domain 'absolute'-mode c_up_field/c_down_field to the sample's own patch window (previously crashed with a shape-mismatch ValueError on real data).")
+
     from .edge_vs_interior_picp import edge_interior_masks, load_and_summarize
     with tempfile.TemporaryDirectory() as d:
         pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
