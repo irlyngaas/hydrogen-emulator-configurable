@@ -190,7 +190,7 @@ def _per_cell_picp_stats(inside, cell_index, n_cells):
     }
 
 
-def fit_spatial_field(y, mean, up, down, cell_index, n_cells, field_shape, quantile, rank):
+def fit_spatial_field(y, mean, up, down, cell_index, n_cells, field_shape, quantile, rank, verbose=0):
     """Orchestrates the three stages for ONE channel's already-flattened
     data and returns (c_up_field, c_down_field, alpha_up, alpha_down),
     each field shaped `field_shape` (= (patch_size, patch_size) for
@@ -213,6 +213,32 @@ def fit_spatial_field(y, mean, up, down, cell_index, n_cells, field_shape, quant
     )
     alpha_up = opt.optimize_up(verbose=0)
     alpha_down = opt.optimize_down(verbose=0)
+
+    if verbose > 0:
+        # alpha hitting EXACTLY the search ceiling (100000.0) means the
+        # bisection's own upper endpoint f1 never reached 0 -- i.e. even
+        # the widest allowed rescale couldn't bring the outside-count down
+        # to num_outlier. Two different reasons produce that symptom and
+        # need different fixes: (a) the smoothed field going negative or
+        # near-zero SOMEWHERE (breaks the monotonicity BoundaryOptimizer's
+        # docstring explicitly requires -- increasing alpha then makes
+        # that cell's bound narrower, not wider, so it can actively
+        # prevent convergence), or (b) the field staying strictly positive
+        # everywhere but some points' true residual is large enough that
+        # no finite rescale (up to the 100000 ceiling) covers them AND
+        # there are more such points than num_outlier allows (a genuine
+        # data/undersampling issue, not a smoothing bug). Printing the
+        # smoothed field's own min (sign/near-zero check) plus the
+        # actual achieved vs. target outside-count at the ceiling
+        # distinguishes them directly instead of guessing.
+        up_outside_at_ceiling = int(np.count_nonzero(y >= mean + 100000.0 * (up * c_up_smooth_pp)))
+        down_outside_at_ceiling = int(np.count_nonzero(y <= mean - 100000.0 * (down * c_down_smooth_pp)))
+        print(f'[fit_spatial_field] smoothed field min/max: c_up [{c_up_smooth_field.min():.4g}, {c_up_smooth_field.max():.4g}], '
+              f'c_down [{c_down_smooth_field.min():.4g}, {c_down_smooth_field.max():.4g}]')
+        print(f'[fit_spatial_field] alpha_up={alpha_up:.4f}, alpha_down={alpha_down:.4f}, num_outlier target={num_outlier} '
+              f'(total points={y.shape[0]}); at the ceiling (alpha=100000): up_outside={up_outside_at_ceiling}, '
+              f'down_outside={down_outside_at_ceiling}')
+
     c_up_field = alpha_up * c_up_smooth_field
     c_down_field = alpha_down * c_down_smooth_field
     return c_up_field, c_down_field, alpha_up, alpha_down

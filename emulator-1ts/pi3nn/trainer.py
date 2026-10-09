@@ -379,6 +379,7 @@ class PI3NNConvTrainer:
                       f'(mean {u_c.mean():.4g}), down_t range [{d_c.min():.4g}, {d_c.max():.4g}] (mean {d_c.mean():.4g})')
                 c_up_f, c_down_f, alpha_up, alpha_down = fit_spatial_field(
                     y_c, m_c, u_c, d_c, cell_index, n_cells, (field_h, field_w), quantile, rank,
+                    verbose=verbose,
                 )
                 c_up_field[c] = torch.from_numpy(c_up_f)
                 c_down_field[c] = torch.from_numpy(c_down_f)
