@@ -43,6 +43,8 @@ validated flat port's `python3 -m pi3nn_torch.run_boston_comparison`):
   torchrun --nproc_per_node=2 --standalone -m pi3nn.validate_synthetic --mode ddp_loss
 """
 import argparse
+import contextlib
+import io
 import os
 import tempfile
 
@@ -217,6 +219,7 @@ def run_full():
 
     check_compute_bounds_broadcasting()
     check_unscale_pressure_width_is_sigma_only()
+    check_plot_prediction_mse_panel()
     check_dct_smooth_rank1_is_spatial_mean()
     check_dct_smooth_clips_negative_overshoot()
     check_bisection_handles_unreachable_quota_from_below()
@@ -336,6 +339,106 @@ def check_unscale_pressure_width_is_sigma_only():
     assert np.allclose(lower_physical, lower_scaled_t[0].numpy(), atol=1e-6), \
         'unscaling mean/down first then computing bounds should match computing bounds first then unscaling lower'
     print('PASS: unscale_pressure_width rescales by sigma only (not the full affine transform), and composes correctly with compute_bounds.')
+
+
+def check_plot_prediction_mse_panel():
+    """plot_prediction.py's squared-error panel ((target - mean_pred)^2)
+    needs target and mean_pred in MATCHING units -- target is read
+    straight from the .pfb in real usage (always physical units, never
+    scaled anywhere in ParFlowDataset), so load_and_plot must scale
+    target to match mean_pred in the --scaled case (physical_units=
+    False), and leave target alone in the default physical_units=True
+    case (where mean_pred gets unscaled TO target's units instead).
+    Checked against an independently hand-computed reference in BOTH
+    modes, using a model_def with non-trivial (non-zero mu) scalers --
+    this file's usual no-op (mu=0, sigma=1) scalers could never catch a
+    units mismatch here.
+
+    Also doubles as the regression test for a real mutation bug this
+    caught directly: load_and_plot used to pass views (from basic
+    indexing + unsqueeze) straight into scale_pressure's in-place
+    assignment, silently corrupting a reused dataset='s underlying
+    storage -- harmless for the real ParFlowDataset (re-reads fresh from
+    disk every __getitem__) but not for a synthetic dataset reused
+    across calls, which this test does deliberately (same SyntheticDataset
+    instance, twice) to prove the fix holds, not just that this one call
+    is correct."""
+    from .plot_prediction import load_and_plot as load_and_plot_prediction
+
+    out_channels = 2
+    scalers = {f'press_diff_{i}': (10.0 + 5.0 * i, 2.0 + i) for i in range(out_channels)}
+    model_def = {
+        'in_channels': out_channels, 'out_channels': out_channels, 'hidden_dim': 4,
+        'kernel_size': 3, 'depth': 1, 'scalers': scalers,
+        'pressure_names': list(scalers.keys()), 'evaptrans_names': [], 'param_names': [],
+        'n_evaptrans': 0, 'parameter_list': None, 'param_nlayer': None,
+    }
+    torch.manual_seed(7)
+    net_mean, net_up, net_down = build_networks(model_def)
+    net_mean, net_up, net_down = (n.to(torch.float64) for n in (net_mean, net_up, net_down))
+    net_mean.eval()
+
+    patch = 4
+    ds = SyntheticDataset(1, (out_channels, patch, patch), (0, patch, patch), (0, patch, patch), (out_channels, patch, patch), seed=3)
+    state_raw, evaptrans_raw, params_raw, target_raw = (t.clone() for t in ds[0])
+
+    state_scaled = state_raw.clone().unsqueeze(0)
+    net_mean.scale_pressure(state_scaled)
+    with torch.no_grad():
+        mean_pred_scaled = net_mean(state_scaled, evaptrans_raw.unsqueeze(0), params_raw.unsqueeze(0))[0]
+
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({
+            'net_mean': net_mean.state_dict(), 'net_up': net_up.state_dict(), 'net_down': net_down.state_dict(),
+            'model_def': model_def, 'c_up': torch.ones(out_channels, dtype=torch.float64),
+            'c_down': torch.ones(out_channels, dtype=torch.float64),
+        }, pth_path)
+        config_path = os.path.join(d, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump({'dtype': 'float64'}, f)
+
+        for physical_units in (True, False):
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                load_and_plot_prediction(
+                    pth_path, config_path, split='train', index=0,
+                    out_path=os.path.join(d, f'check_{physical_units}.png'),
+                    dataset=ds, physical_units=physical_units,
+                )
+            output = captured.getvalue()
+
+            if physical_units:
+                mean_pred_ref = mean_pred_scaled.clone().unsqueeze(0)
+                net_mean.unscale_pressure(mean_pred_ref)
+                mean_pred_ref = mean_pred_ref[0]
+                target_ref = target_raw
+            else:
+                mean_pred_ref = mean_pred_scaled
+                target_ref = target_raw.clone().unsqueeze(0)
+                net_mean.scale_pressure(target_ref)
+                target_ref = target_ref[0]
+
+            expected_mse = ((target_ref - mean_pred_ref) ** 2).mean(dim=(-2, -1)).numpy()
+            for c in range(out_channels):
+                marker = f'channel {c}: MSE (this sample) = '
+                line = next(l for l in output.splitlines() if marker in l)
+                printed_mse = float(line.split(marker)[1])
+                assert np.isclose(printed_mse, expected_mse[c], rtol=1e-3), (
+                    f'physical_units={physical_units}, channel {c}: printed MSE {printed_mse} != '
+                    f'expected {expected_mse[c]:.6g} (units mismatch between target and mean_pred?)'
+                )
+
+        # Regression check for the view-mutation bug: ds was used for BOTH
+        # iterations above -- if load_and_plot had mutated its storage in
+        # place, this would catch it, since target_raw/state_raw (cloned
+        # ONCE, before either call) is what both reference computations
+        # above were built from, and ds[0] re-read now must still match.
+        state_after, _, _, target_after = ds[0]
+        assert torch.equal(state_after, state_raw) and torch.equal(target_after, target_raw), (
+            "load_and_plot mutated the injected dataset's underlying storage in place"
+        )
+    print('PASS: plot_prediction\'s squared-error panel matches an independently hand-computed reference in both physical and standardized units, without mutating the injected dataset.')
 
 
 def check_dct_smooth_rank1_is_spatial_mean():

@@ -1,9 +1,12 @@
 """
 Plot one real input sample's mean prediction plus calibrated upper/
-lower bounds and interval width, as per-channel heatmap panels --
-complements plot_spatial_field.py (which plots the calibration
-CONSTANTS: c_up_field/c_down_field/picp_field) by showing what those
-constants actually produce for a real forecast.
+lower bounds, interval width, and squared error against the real
+target, as per-channel heatmap panels -- complements plot_spatial_field.py
+(which plots the calibration CONSTANTS: c_up_field/c_down_field/
+picp_field) by showing what those constants actually produce for a real
+forecast, and plot_residual_field.py (which plots the TRUE one-sided
+residual target net_up/net_down were trained to predict) by showing
+where the point estimate itself is actually wrong.
 
 Separate panels for mean/lower/upper/width rather than per-pixel error
 bars: drawing a literal error-bar glyph at every one of patch_size**2
@@ -56,29 +59,33 @@ def compute_bounds(mean_pred, up_pred, down_pred, c_up, c_down):
     return upper, lower, width
 
 
-def plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_names=None):
-    """mean_pred/upper/lower/width: (out_channels, H, W) numpy arrays.
-    Saves one PNG, one row per channel, four columns: mean (its own
-    color scale), down-offset (mean - lower), up-offset (upper - mean),
-    width (upper - lower). Plotting raw lower/upper on the SAME scale as
-    mean (an earlier version of this function did) breaks badly
-    whenever the calibrated bound is narrow relative to the mean
-    field's own spatial range -- which is the common case, since the
-    bound only needs to span the residual, not the signal -- making
-    mean/lower/upper look visually identical and the plot uninformative
-    (caught by the user looking at a real rendered plot). Plotting the
-    OFFSETS instead, on their own shared scale, shows the actual
-    spatial pattern in the bounds regardless of how it compares to
-    mean's own range, and additionally reveals asymmetry between the
-    up and down bound that width alone collapses away."""
+def plot_prediction_fields(mean_pred, upper, lower, width, squared_error, out_path, channel_names=None):
+    """mean_pred/upper/lower/width/squared_error: (out_channels, H, W)
+    numpy arrays. Saves one PNG, one row per channel, five columns: mean
+    (its own color scale), down-offset (mean - lower), up-offset
+    (upper - mean), width (upper - lower), squared error ((target -
+    mean)^2, its own color scale -- lets you see directly whether the
+    calibrated interval is actually wide where the point estimate is
+    wrong, not just where net_up/net_down happens to predict a large
+    magnitude). Plotting raw lower/upper on the SAME scale as mean (an
+    earlier version of this function did) breaks badly whenever the
+    calibrated bound is narrow relative to the mean field's own spatial
+    range -- which is the common case, since the bound only needs to
+    span the residual, not the signal -- making mean/lower/upper look
+    visually identical and the plot uninformative (caught by the user
+    looking at a real rendered plot). Plotting the OFFSETS instead, on
+    their own shared scale, shows the actual spatial pattern in the
+    bounds regardless of how it compares to mean's own range, and
+    additionally reveals asymmetry between the up and down bound that
+    width alone collapses away."""
     import matplotlib.pyplot as plt
 
     out_channels = mean_pred.shape[0]
     channel_names = channel_names or [f'channel {c}' for c in range(out_channels)]
-    fig, axes = plt.subplots(out_channels, 4, figsize=(16, 3.2 * out_channels), squeeze=False)
+    fig, axes = plt.subplots(out_channels, 5, figsize=(20, 3.2 * out_channels), squeeze=False)
 
     for c in range(out_channels):
-        ax_mean, ax_down_off, ax_up_off, ax_width = axes[c]
+        ax_mean, ax_down_off, ax_up_off, ax_width, ax_mse = axes[c]
 
         im_mean = ax_mean.imshow(mean_pred[c], cmap='viridis')
         ax_mean.set_title(f'{channel_names[c]}: mean')
@@ -104,6 +111,14 @@ def plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_nam
         im_w = ax_width.imshow(width[c], cmap='magma')
         ax_width.set_title(f'{channel_names[c]}: width (upper-lower)')
         fig.colorbar(im_w, ax=ax_width, fraction=0.046, pad=0.04)
+
+        # Same robust-percentile reasoning as off_vmax above -- a single
+        # outlier pixel's squared error would otherwise wash out real
+        # variation everywhere else into a sliver of the colorbar.
+        mse_vmax = max(float(np.percentile(squared_error[c], 99)), 1e-12)
+        im_mse = ax_mse.imshow(squared_error[c], cmap='magma', vmin=0, vmax=mse_vmax)
+        ax_mse.set_title(f'{channel_names[c]}: (target - mean)^2')
+        fig.colorbar(im_mse, ax=ax_mse, fraction=0.046, pad=0.04)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -180,7 +195,18 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
         state, evaptrans, params, target = ds[index]
         y_min = x_min = None
     patch_size = ds.patch_size
-    state, evaptrans, params, target = (t.unsqueeze(0) for t in (state, evaptrans, params, target))
+    # .clone(), not just .unsqueeze(0): basic integer indexing + unsqueeze
+    # both return VIEWS, and scale_pressure/scale_evaptrans/scale_statics/
+    # unscale_* below all mutate in place -- without cloning, this would
+    # silently corrupt the caller's own dataset storage for any dataset=
+    # whose __getitem__ returns a view into pre-allocated tensors (true
+    # of validate_synthetic.py's SyntheticDataset/SyntheticCoordDataset,
+    # reused across multiple load_and_plot calls in several tests --
+    # confirmed by direct reproduction, not just suspected). Harmless for
+    # the real ParFlowDataset (every __getitem__ re-reads fresh from disk,
+    # no shared storage to corrupt), but this function shouldn't rely on
+    # that being true of whatever dataset= it's handed.
+    state, evaptrans, params, target = (t.unsqueeze(0).clone() for t in (state, evaptrans, params, target))
     net_mean.scale_pressure(state)
     net_mean.scale_evaptrans(evaptrans)
     net_mean.scale_statics(params)
@@ -235,18 +261,26 @@ def load_and_plot(pth_path, config_path, split='train', index=0, out_path=None, 
         # unscale_pressure on a magnitude would incorrectly shift it by
         # the per-channel mean). Mutates the still-batched torch tensors,
         # same convention as scale_pressure/scale_evaptrans/scale_statics
-        # above.
+        # above. target is already physical (ParFlowDataset reads it
+        # straight from the .pfb, never scaled anywhere) -- it only needs
+        # touching in the --scaled branch below, to match mean_pred there.
         net_mean.unscale_pressure(mean_pred_t)
         net_mean.unscale_pressure_width(up_pred_t)
         net_mean.unscale_pressure_width(down_pred_t)
         mean_pred = mean_pred_t[0].numpy()
         up_pred = up_pred_t[0].numpy()
         down_pred = down_pred_t[0].numpy()
+    else:
+        net_mean.scale_pressure(target)
+
+    squared_error = (target[0].numpy() - mean_pred) ** 2
+    for c in range(squared_error.shape[0]):
+        print(f'[plot_prediction] channel {c}: MSE (this sample) = {squared_error[c].mean():.4g}')
 
     upper, lower, width = compute_bounds(mean_pred, up_pred, down_pred, c_up, c_down)
     channel_names = model_def.get('pressure_names')
     out_path = out_path or pth_path.rsplit('.pth', 1)[0] + f'_{split}_idx{index}_prediction.png'
-    plot_prediction_fields(mean_pred, upper, lower, width, out_path, channel_names=channel_names)
+    plot_prediction_fields(mean_pred, upper, lower, width, squared_error, out_path, channel_names=channel_names)
 
 
 if __name__ == '__main__':
