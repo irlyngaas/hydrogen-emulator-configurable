@@ -62,6 +62,49 @@ def patch_starts(extent, patch_size, overlap):
     return starts
 
 
+def seam_discontinuity_stats(field, patch_size, overlap):
+    """Quantifies whether patch_starts' internal seams (the boundary
+    between adjacent patches) show a measurably larger jump in `field`
+    than typical interior (non-seam) adjacent pixels do -- the direct,
+    numeric version of eyeballing a stitched plot for grid-aligned
+    discontinuities, since a real but modest jump can easily hide under
+    a plot's colorscale without visually dominating.
+
+    field: (C, H, W). Most informative at overlap=0, where a seam is a
+    genuine abrupt juxtaposition of two independently-predicted patches;
+    at higher overlap the seam band is smoothed by averaging, so the
+    real comparison is against overlap=0's own numbers for the SAME
+    checkpoint (does the ratio shrink as overlap grows?), not just
+    looking at one overlap value in isolation.
+
+    Returns {'y': (seam_jump, interior_jump), 'x': (seam_jump,
+    interior_jump)}, each shape (C,) -- seam_jump is the mean absolute
+    difference across every internal seam position (NOT the true domain
+    edges -- those aren't a stitching artifact), interior_jump is the
+    same statistic over every other adjacent-pixel pair, excluding seam
+    positions entirely so it isn't contaminated by the very thing being
+    measured against it."""
+    C, H, W = field.shape
+    results = {}
+    for axis, extent in (('y', H), ('x', W)):
+        starts = patch_starts(extent, patch_size, overlap)
+        seam_positions = sorted(s for s in set(starts) if 0 < s < extent)
+        diffs = np.abs(np.diff(field, axis=1 if axis == 'y' else 2))  # diffs[..., i] = |field[..., i+1] - field[..., i]|
+        n_diffs = diffs.shape[1 if axis == 'y' else 2]
+        is_seam = np.zeros(n_diffs, dtype=bool)
+        for s in seam_positions:
+            is_seam[s - 1] = True  # diffs index s-1 straddles the seam AT s (field[s] vs field[s-1])
+        reduce_axes = (1, 2)
+        if axis == 'y':
+            seam_jump = diffs[:, is_seam, :].mean(axis=reduce_axes)
+            interior_jump = diffs[:, ~is_seam, :].mean(axis=reduce_axes)
+        else:
+            seam_jump = diffs[:, :, is_seam].mean(axis=reduce_axes)
+            interior_jump = diffs[:, :, ~is_seam].mean(axis=reduce_axes)
+        results[axis] = (seam_jump, interior_jump)
+    return results
+
+
 def load_and_plot(pth_path, config_path, split='train', index=0, overlap=0, out_path=None, dataset=None, physical_units=True):
     """dataset: same dataset-injection seam the other pi3nn plotting
     scripts have, for synthetic testing."""
@@ -176,6 +219,21 @@ def load_and_plot(pth_path, config_path, split='train', index=0, overlap=0, out_
 
     for c in range(out_channels):
         print(f'[plot_stitched_prediction] channel {c}: MSE (whole domain) = {squared_error[c].mean():.4g}')
+
+    # Quantifies whether patch seams show a measurably larger jump in the
+    # mean prediction than typical interior pixels do -- the numeric
+    # version of eyeballing the plot for grid-aligned discontinuities
+    # (a real but modest jump can hide under a colorscale without
+    # visually dominating). Most informative at overlap=0; the real
+    # comparison is against this same printout at a higher --overlap for
+    # the SAME checkpoint, to see whether blending actually shrinks it.
+    seam_stats = seam_discontinuity_stats(mean_pred, patch_size, overlap)
+    for axis in ('y', 'x'):
+        seam_jump, interior_jump = seam_stats[axis]
+        for c in range(out_channels):
+            ratio = seam_jump[c] / max(interior_jump[c], 1e-12)
+            print(f'[plot_stitched_prediction] channel {c}, {axis}-seams: mean |jump| at seams={seam_jump[c]:.4g}, '
+                  f'at interior pixels={interior_jump[c]:.4g} (ratio {ratio:.2f}x)')
 
     channel_names = model_def.get('pressure_names')
     out_path = out_path or pth_path.rsplit('.pth', 1)[0] + f'_{split}_idx{index}_overlap{overlap}_stitched.png'

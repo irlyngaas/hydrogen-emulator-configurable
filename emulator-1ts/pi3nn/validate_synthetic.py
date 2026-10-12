@@ -222,6 +222,7 @@ def run_full():
     check_plot_prediction_mse_panel()
     check_patch_starts_covers_domain_with_no_gaps()
     check_plot_stitched_prediction_matches_manual_accumulation()
+    check_seam_discontinuity_stats_detects_a_known_jump()
     check_dct_smooth_rank1_is_spatial_mean()
     check_dct_smooth_clips_negative_overshoot()
     check_bisection_handles_unreachable_quota_from_below()
@@ -441,6 +442,55 @@ def check_plot_prediction_mse_panel():
             "load_and_plot mutated the injected dataset's underlying storage in place"
         )
     print('PASS: plot_prediction\'s squared-error panel matches an independently hand-computed reference in both physical and standardized units, without mutating the injected dataset.')
+
+
+def check_seam_discontinuity_stats_detects_a_known_jump():
+    """seam_discontinuity_stats must report a LARGE seam_jump relative
+    to interior_jump on a field with a real, deliberately-placed step
+    discontinuity exactly at a patch seam, and report seam_jump roughly
+    EQUAL to interior_jump on a perfectly smooth field with no seam
+    effect at all -- checked both ways, since a metric that always
+    reports 'seams are worse' regardless of the actual field would be
+    useless for telling whether a real checkpoint's seams are bad."""
+    from .plot_stitched_prediction import patch_starts, seam_discontinuity_stats
+
+    patch_size, overlap = 4, 0
+    extent = 8  # patch_starts(8, 4, 0) == [0, 4] -- one internal seam at x=4/y=4
+    starts = patch_starts(extent, patch_size, overlap)
+    assert starts == [0, 4], f'test setup assumption wrong: expected [0, 4], got {starts}'
+
+    # Smooth field (linear ramp, no discontinuity anywhere) -- seam and
+    # interior jumps should be (exactly, for a perfectly linear ramp)
+    # equal.
+    ramp = np.broadcast_to(np.arange(extent, dtype=np.float64), (extent, extent))
+    smooth_field = ramp[None, :, :]  # (1, H, W), varies only along x
+    stats = seam_discontinuity_stats(smooth_field, patch_size, overlap)
+    seam_jump, interior_jump = stats['x']
+    assert np.isclose(seam_jump[0], interior_jump[0]), (
+        f'a perfectly smooth field should show no seam-vs-interior difference, '
+        f'got seam={seam_jump[0]:.4g}, interior={interior_jump[0]:.4g}'
+    )
+    seam_jump_y, interior_jump_y = stats['y']
+    assert np.isclose(seam_jump_y[0], 0.0) and np.isclose(interior_jump_y[0], 0.0), \
+        'field is constant along y -- both jumps should be exactly 0'
+
+    # Same ramp, but with a large, deliberate step inserted exactly at
+    # the seam (x=4) -- seam_jump should now be dramatically larger than
+    # interior_jump, which should be unaffected (it excludes the seam
+    # position entirely).
+    jumpy_field = smooth_field.copy()
+    jumpy_field[:, :, 4:] += 100.0
+    stats = seam_discontinuity_stats(jumpy_field, patch_size, overlap)
+    seam_jump, interior_jump = stats['x']
+    assert seam_jump[0] > 50 * interior_jump[0], (
+        f'a deliberate 100-unit step at the seam should dominate seam_jump -- '
+        f'got seam={seam_jump[0]:.4g}, interior={interior_jump[0]:.4g}'
+    )
+    assert np.isclose(interior_jump[0], 1.0), (
+        f'interior_jump should be unaffected by the seam-only step (still the ramp\'s own slope of 1.0), '
+        f'got {interior_jump[0]:.4g}'
+    )
+    print('PASS: seam_discontinuity_stats correctly distinguishes a real seam discontinuity from a smooth field with none.')
 
 
 def check_patch_starts_covers_domain_with_no_gaps():
