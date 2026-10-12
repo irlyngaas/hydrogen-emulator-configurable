@@ -220,6 +220,8 @@ def run_full():
     check_compute_bounds_broadcasting()
     check_unscale_pressure_width_is_sigma_only()
     check_plot_prediction_mse_panel()
+    check_patch_starts_covers_domain_with_no_gaps()
+    check_plot_stitched_prediction_matches_manual_accumulation()
     check_dct_smooth_rank1_is_spatial_mean()
     check_dct_smooth_clips_negative_overshoot()
     check_bisection_handles_unreachable_quota_from_below()
@@ -439,6 +441,152 @@ def check_plot_prediction_mse_panel():
             "load_and_plot mutated the injected dataset's underlying storage in place"
         )
     print('PASS: plot_prediction\'s squared-error panel matches an independently hand-computed reference in both physical and standardized units, without mutating the injected dataset.')
+
+
+def check_patch_starts_covers_domain_with_no_gaps():
+    """plot_stitched_prediction.patch_starts must always cover the whole
+    [0, extent) domain, even when (extent - patch_size) isn't evenly
+    divisible by the stride -- the exact xbatcher gap this project
+    already found and worked around for 'absolute'-mode calibration
+    coverage (see dataset.py's return_coords plumbing / the 'absolute'
+    coverage diagnostics in trainer.py). Checked both for an evenly-
+    divisible case (no clamping needed) and the real 64-domain,
+    overlap=4, patch_size=16 case this project hit directly (5 positions:
+    0,12,24,36,48 -- already confirmed by hand elsewhere in this
+    project) plus a deliberately NON-divisible case (67, 16, 4) that
+    needs the final-position clamp to avoid leaving a gap."""
+    from .plot_stitched_prediction import patch_starts
+
+    def assert_full_coverage(extent, patch_size, overlap):
+        starts = patch_starts(extent, patch_size, overlap)
+        covered = np.zeros(extent, dtype=bool)
+        for s in starts:
+            assert 0 <= s <= extent - patch_size, f'start {s} out of bounds for extent={extent}, patch_size={patch_size}'
+            covered[s:s + patch_size] = True
+        assert covered.all(), f'patch_starts({extent}, {patch_size}, {overlap}) leaves a gap: starts={starts}'
+        return starts
+
+    assert assert_full_coverage(64, 16, 4) == [0, 12, 24, 36, 48], \
+        'the known 64-domain/overlap=4 case should give exactly 5 positions: 0,12,24,36,48'
+    assert_full_coverage(64, 16, 0)
+    assert_full_coverage(64, 16, 8)
+    starts_67 = assert_full_coverage(67, 16, 4)
+    assert starts_67[-1] == 67 - 16, 'the non-divisible case must still end with a start clamped to extent - patch_size'
+    print('PASS: patch_starts covers the whole domain with no gaps, including the non-evenly-divisible case.')
+
+
+class SyntheticGridDataset:
+    """Minimal fixture for plot_stitched_prediction.load_and_plot:
+    supports read_patch(time_index, y_min, x_min) by slicing a single
+    fixed full-domain tensor per field, so a stitched full-domain result
+    can be checked against reading the SAME underlying data directly --
+    not just 'does it run'. Single timestep only (time_index is always
+    0); bgen/pressure_files are tiny stand-ins matching only the
+    specific attribute access load_and_plot actually does (ds.bgen[idx]
+    ['time'].values[0], ds.pressure_files['t'][time_index]), not real
+    xbatcher."""
+
+    class _FakeTimeSel:
+        def __init__(self, t):
+            self.values = np.array([t])
+
+    class _FakeBgen:
+        def __getitem__(self, idx):
+            return {'time': SyntheticGridDataset._FakeTimeSel(0)}
+
+    def __init__(self, out_channels, extent, patch_size, seed):
+        g = torch.Generator().manual_seed(seed)
+        self.state_full = torch.randn((out_channels, extent, extent), generator=g, dtype=torch.float64)
+        self.target_full = torch.randn((out_channels, extent, extent), generator=g, dtype=torch.float64)
+        self.evaptrans_full = torch.zeros((0, extent, extent), dtype=torch.float64)
+        self.params_full = torch.zeros((0, extent, extent), dtype=torch.float64)
+        self.patch_size = patch_size
+        self.Y_EXTENT = extent
+        self.X_EXTENT = extent
+        self.pressure_files = {'t': ['fake_pressure.pfb']}
+        self.bgen = self._FakeBgen()
+
+    def read_patch(self, time_index, y_min, x_min):
+        p = self.patch_size
+        sl = (slice(None), slice(y_min, y_min + p), slice(x_min, x_min + p))
+        return self.state_full[sl].clone(), self.evaptrans_full[sl].clone(), self.params_full[sl].clone(), self.target_full[sl].clone()
+
+
+def check_plot_stitched_prediction_matches_manual_accumulation():
+    """Verifies plot_stitched_prediction's stitching/averaging arithmetic
+    against an independently hand-rolled accumulation over the SAME
+    patches, in two regimes: overlap=0 (every pixel covered by exactly
+    one patch -- averaging must be a pure no-op, this should reproduce
+    each patch's own prediction exactly) and overlap=2 with patch_size=4
+    on an 8x8 domain (genuine overlapping coverage -- some pixels ARE
+    covered by 2 patches, so this checks the average is computed
+    correctly, not just that the no-overlap case happens to work)."""
+    from .plot_stitched_prediction import load_and_plot as load_and_plot_stitched, patch_starts
+
+    out_channels = 2
+    scalers = {f'press_diff_{i}': (0.0, 1.0) for i in range(out_channels)}
+    model_def = {
+        'in_channels': out_channels, 'out_channels': out_channels, 'hidden_dim': 4,
+        'kernel_size': 3, 'depth': 1, 'scalers': scalers,
+        'pressure_names': list(scalers.keys()), 'evaptrans_names': [], 'param_names': [],
+        'n_evaptrans': 0, 'parameter_list': None, 'param_nlayer': None,
+    }
+    torch.manual_seed(11)
+    net_mean, net_up, net_down = build_networks(model_def)
+    net_mean, net_up, net_down = (n.to(torch.float64).eval() for n in (net_mean, net_up, net_down))
+
+    extent, patch_size = 8, 4
+    ds = SyntheticGridDataset(out_channels, extent, patch_size, seed=5)
+    c_up_full = torch.ones(out_channels, extent, extent, dtype=torch.float64) * 1.5
+    c_down_full = torch.ones(out_channels, extent, extent, dtype=torch.float64) * 2.0
+
+    def manual_accumulate(overlap):
+        sum_mean = np.zeros((out_channels, extent, extent))
+        count = np.zeros((extent, extent))
+        for y_min in patch_starts(extent, patch_size, overlap):
+            for x_min in patch_starts(extent, patch_size, overlap):
+                state, evaptrans, params, target = ds.read_patch(0, y_min, x_min)
+                state = state.unsqueeze(0).clone()
+                with torch.no_grad():
+                    mean_pred = net_mean(state, evaptrans.unsqueeze(0), params.unsqueeze(0))[0].numpy()
+                sl = (slice(None), slice(y_min, y_min + patch_size), slice(x_min, x_min + patch_size))
+                sum_mean[sl] += mean_pred
+                count[y_min:y_min + patch_size, x_min:x_min + patch_size] += 1
+        return sum_mean / count
+
+    with tempfile.TemporaryDirectory() as d:
+        pth_path = os.path.join(d, 'synthetic_pi3nn.pth')
+        torch.save({
+            'net_mean': net_mean.state_dict(), 'net_up': net_up.state_dict(), 'net_down': net_down.state_dict(),
+            'model_def': model_def, 'c_up_field': c_up_full, 'c_down_field': c_down_full,
+            'spatial_field_coords': 'absolute',
+        }, pth_path)
+        config_path = os.path.join(d, 'config.yaml')
+        with open(config_path, 'w') as f:
+            yaml.dump({'dtype': 'float64'}, f)
+
+        for overlap in (0, 2):
+            expected_mean = manual_accumulate(overlap)
+            mean_pred, upper, lower, width, squared_error = load_and_plot_stitched(
+                pth_path, config_path, split='train', index=0, overlap=overlap,
+                out_path=os.path.join(d, f'check_overlap{overlap}.png'), dataset=ds,
+            )
+            assert np.allclose(mean_pred, expected_mean, atol=1e-8), (
+                f'overlap={overlap}: stitched mean_pred does not match manual per-patch accumulation '
+                f'(max diff {np.abs(mean_pred - expected_mean).max():.3g})'
+            )
+            if overlap == 2:
+                # Genuine overlap exists here (stride=2 < patch_size=4) --
+                # confirm this test actually exercised averaging, not just
+                # a coincidentally-matching no-overlap-like case.
+                counts = np.zeros((extent, extent))
+                for y_min in patch_starts(extent, patch_size, overlap):
+                    for x_min in patch_starts(extent, patch_size, overlap):
+                        counts[y_min:y_min + patch_size, x_min:x_min + patch_size] += 1
+                assert (counts > 1).any(), 'test setup error: overlap=2 case has no actually-overlapping pixels'
+
+    print('PASS: plot_stitched_prediction\'s stitching/averaging matches independent manual accumulation, '
+          'both without overlap (exact per-patch reproduction) and with genuine overlapping coverage.')
 
 
 def check_dct_smooth_rank1_is_spatial_mean():

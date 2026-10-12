@@ -163,15 +163,29 @@ class ParFlowDataset(Dataset):
 
         # Pulling the indices we need
         time_index = sample_indices['time'].values[0]
-        x_min, x_max = sample_indices['x'].values[[0, -1]]
-        y_min, y_max = sample_indices['y'].values[[0, -1]]
+        x_min = sample_indices['x'].values[0]
+        y_min = sample_indices['y'].values[0]
+        return self.read_patch(time_index, y_min, x_min)
+
+    def read_patch(self, time_index, y_min, x_min):
+        """Reads one patch_size x patch_size patch at an EXPLICIT real
+        domain position, bypassing self.bgen's shuffled index entirely --
+        __getitem__ above is now just this plus resolving (time_index,
+        y_min, x_min) from a shuffled idx. Factored out for
+        pi3nn/plot_stitched_prediction.py, which needs to read every
+        patch tiling the WHOLE domain at one specific timestep, in grid
+        order, with its own independently-chosen overlap (for comparing
+        how much blending different overlaps need) -- not a sample
+        drawn from the (shuffled, train/valid-split) training set."""
+        x_max = x_min + self.patch_size - 1
+        y_max = y_min + self.patch_size - 1
 
         # Setting up the keys dictionary
         patch_keys = {
             'x': {'start': x_min, 'stop': x_max+1},
             'y': {'start': y_min, 'stop': y_max+1},
         }
-    
+
         # Construct the state data and scale it:
         file_to_read = self.pressure_files['t'][time_index]
         state_data = read_pfb(file_to_read, keys=patch_keys)
